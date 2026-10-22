@@ -1,0 +1,17 @@
+# Local manuscripts, imported material, snapshots, queues and API sessions.
+/data/
+/library/
+
+# One-off scripts and previews may contain the author's unpublished novel.
+/scripts/
+/preview*.png
+
+# Local credentials, tooling and generated archives.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+node_modules/
+*.zip
+*.log
