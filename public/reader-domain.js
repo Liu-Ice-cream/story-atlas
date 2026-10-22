@@ -10,31 +10,58 @@ export function readerVolumeTitle(chapter) {
   const heading = chapter.body.replace(/^\uFEFF/, '').split(/\r?\n/).filter(s => s.trim()).slice(0, 2).map(s => s.match(/^#{1,6}\s+(.+)/)?.[1]?.trim()).find(s => s?.replace(/\s/g, '').startsWith(chapter.volume.replace(/\s/g, '')));
   return heading || chapter.volume;
 }
-export function readerBlocks(chapter) {
+export function readerBlocks(chapter, { withOffsets = false } = {}) {
   const markdown = /\.(md|markdown)$/i.test(chapter.filename || '');
-  const inline = text => markdown ? text.replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1').replace(/\[([^\]]+)\]\([^)]*\)/g, '$1').replace(/\*\*([^*]+)\*\*/g, '$1').replace(/__([^_]+)__/g, '$1').replace(/`([^`]+)`/g, '$1') : text;
-  const lines = chapter.body.replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n').split('\n');
+  const trace = (text, start) => ({ text, lineStart: start, offsets: Array.from({ length: text.length }, (_, i) => start + i), ends: Array.from({ length: text.length }, (_, i) => start + i + 1) });
+  const slice = (t, start, end = t.text.length) => ({ text: t.text.slice(start, end), offsets: t.offsets.slice(start, end), ends: t.ends.slice(start, end) });
+  const trim = t => slice(t, t.text.length - t.text.trimStart().length, t.text.trimEnd().length);
+  const inline = input => {
+    if (!markdown) return input;
+    for (const pattern of [/!\[([^\]]*)\]\([^)]*\)/g, /\[([^\]]+)\]\([^)]*\)/g, /\*\*([^*]+)\*\*/g, /__([^_]+)__/g, /`([^`]+)`/g]) {
+      let previous = 0; const parts = [];
+      for (const match of input.text.matchAll(pattern)) {
+        parts.push(slice(input, previous, match.index));
+        const at = match.index + match[0].indexOf(match[1]);
+        parts.push(slice(input, at, at + match[1].length)); previous = match.index + match[0].length;
+      }
+      parts.push(slice(input, previous));
+      input = { text: parts.map(p => p.text).join(''), offsets: parts.flatMap(p => p.offsets), ends: parts.flatMap(p => p.ends) };
+    }
+    return input;
+  };
+  const lines = []; let start = 0;
+  for (const match of chapter.body.matchAll(/\r\n|\r|\n/g)) { lines.push(trace(chapter.body.slice(start, match.index), start)); start = match.index + match[0].length; }
+  lines.push(trace(chapter.body.slice(start), start));
   const titleKey = text => text.replace(/^#{1,6}\s+/, '').replace(/[\s·•:：—_-]/g, '').trim();
   const volumeTitle = readerVolumeTitle(chapter);
   while (lines.length) {
-    if (!lines[0].trim()) { lines.shift(); continue; }
-    const title = titleKey(lines[0]);
-    if (title === titleKey(chapter.title) || (markdown && volumeTitle && /^#{1,6}\s/.test(lines[0]) && title === titleKey(volumeTitle))) lines.shift();
+    if (!lines[0].text.trim()) { lines.shift(); continue; }
+    const title = titleKey(lines[0].text.replace(/^\uFEFF/, ''));
+    if (title === titleKey(chapter.title) || (markdown && volumeTitle && /^#{1,6}\s/.test(lines[0].text) && title === titleKey(volumeTitle))) lines.shift();
     else break;
   }
   const blocks = []; let fence = false, code = [];
+  const emit = (type, t) => blocks.push({ type, text: t.text, ...(withOffsets ? { sourceOffsets: t.offsets, sourceEnds: t.ends } : {}) });
+  const emitCode = () => {
+    const combined = { text: '', offsets: [], ends: [] };
+    code.forEach((line, i) => {
+      if (i) { combined.text += '\n'; combined.offsets.push(code[i - 1].ends.at(-1) ?? code[i - 1].lineStart); combined.ends.push(line.lineStart); }
+      combined.text += line.text; combined.offsets.push(...line.offsets); combined.ends.push(...line.ends);
+    });
+    emit('pre', combined); code = [];
+  };
   for (const line of lines) {
-    const text = line.trim();
-    if (markdown && /^\s*(```|~~~)/.test(line)) { if (fence) { blocks.push({ type: 'pre', text: code.join('\n') }); code = []; } fence = !fence; continue; }
+    const t = trim(line), text = t.text;
+    if (markdown && /^\s*(```|~~~)/.test(line.text)) { if (fence) emitCode(); fence = !fence; continue; }
     if (fence) { code.push(line); continue; }
     if (!text) continue;
     if (/^(?:\*\s*){3,}$|^(?:-\s*){3,}$|^(?:_\s*){3,}$|^[＊*·•]{3,}$/.test(text)) { blocks.push({ type: 'break', text: '＊ ＊ ＊' }); continue; }
     const heading = markdown && text.match(/^#{1,6}\s+(.+)/);
-    if (heading) blocks.push({ type: 'heading', text: inline(heading[1]) });
-    else if (markdown && text.startsWith('>')) blocks.push({ type: 'quote', text: inline(text.replace(/^>\s?/, '')) });
-    else blocks.push({ type: 'paragraph', text: inline(text) });
+    if (heading) emit('heading', inline(slice(t, heading[0].length - heading[1].length)));
+    else if (markdown && text.startsWith('>')) emit('quote', inline(slice(t, text.match(/^>\s?/)[0].length)));
+    else emit('paragraph', inline(t));
   }
-  if (fence && code.length) blocks.push({ type: 'pre', text: code.join('\n') });
+  if (fence && code.length) emitCode();
   return blocks;
 }
 export function normalizeReadingRecord(value, chapters) {

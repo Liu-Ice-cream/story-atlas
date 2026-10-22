@@ -1,5 +1,6 @@
 import { uid, now, sortChapters } from './domain.js';
 import { AGENTS, PROMPT_VERSION, ruleCategories, sentenceDiff } from './studio-domain.js';
+import { writingSelection } from './chapter-text.js';
 
 export function createStudioUI(ctx) {
   const { state, api, mutate, render, navigate, e, tag, button, openModal, closeModal, modalError, toast, chooseFiles, decodeFile, download } = ctx;
@@ -28,12 +29,18 @@ export function createStudioUI(ctx) {
     if (!f.profileId || !profiles.some(p => p.id === f.profileId)) f.profileId = profiles[0]?.id || '';
     if (!f.chapterId || !chapters.some(c => c.id === f.chapterId)) f.chapterId = chapters.at(-1)?.id || '';
     const options = (items, value) => items.map(([id, label]) => `<option value="${e(id)}" ${id === value ? 'selected' : ''}>${e(label)}</option>`).join('');
-    return `<form id="studio-writing-form"><div class="field-row"><label class="field"><span>任务</span><select class="select" name="mode">${options([['rewrite', '改写已有片段'], ['continue', '按指引续写']], f.mode)}</select></label><label class="field"><span>使用文风</span><select class="select" name="profileId" required><option value="">请选择已确认的档案</option>${options(profiles.map(p => [p.id, p.name + ' · v' + p.version]), f.profileId)}</select></label></div>${!profiles.length ? '<p class="notice">先在“参考与文风”中分析材料，并确认一份文风档案。</p>' : ''}<div class="field-row"><label class="field"><span>正文来源</span><select class="select" name="sourceKind">${options([['chapter', '从已导入章节选择'], ['paste', '粘贴片段']], f.sourceKind)}</select></label>${f.sourceKind === 'chapter' ? `<label class="field"><span>章节</span><select class="select" name="chapterId"><option value="">请选择章节</option>${options(chapters.map(c => [c.id, c.title]), f.chapterId)}</select></label>` : `<label class="field"><span>作品资料截止章节</span><select class="select" name="cutoffId"><option value="">最新章节</option>${options(chapters.map(c => [c.id, c.title]), f.cutoffId)}</select></label>`}</div>${f.sourceKind === 'chapter' ? `<div class="studio-selection"><div class="actions">${button('载入章节', 'studio-load-chapter', 'book')}${button(f.mode === 'rewrite' ? '使用选中片段' : '从选区末尾续写', 'studio-use-selection', 'check')}${button('从本章末尾续写', 'studio-use-end', 'arrow')}</div><textarea id="studio-chapter-body" readonly aria-label="选择正文范围" placeholder="载入章节后，用鼠标选择需要处理的文字。">${e(local.chapter?.id === f.chapterId ? local.chapter.body : '')}</textarea><div id="studio-selection-status" class="hint">${selectionDescription()}</div></div>` : `<label class="field"><span>${f.mode === 'rewrite' ? '待改写片段' : '续写前文'}</span><textarea name="text" class="studio-input-text" maxlength="12000" placeholder="粘贴原始片段，保留段落。">${e(f.text)}</textarea></label>`}<label class="field"><span>${f.mode === 'rewrite' ? '本次改写要求（可选）' : '接下来要发生什么（必填）'}</span><textarea name="instructions" maxlength="6000" placeholder="例如：保留两人的试探，只调整对白和停顿；或指定接下来发生的事件。">${e(f.instructions)}</textarea></label><div class="field-row"><label class="field"><span>目标篇幅（约，字）</span><input class="input" name="length" type="number" min="100" max="3000" value="${e(f.length)}"/></label><label class="field"><span>表达调整程度</span><select class="select" name="intensity">${options([['light', '轻度润色'], ['medium', '明显调整'], ['strong', '重塑表达，保留指定事实']], f.intensity)}</select></label></div><label class="field"><span>${f.mode === 'continue' ? '写到哪里停止（必填）' : '范围与停止要求（可选）'}</span><input class="input" name="stopAt" maxlength="6000" value="${e(f.stopAt)}" placeholder="例如：写到对方离开，不揭露真实身份"/></label><details class="studio-details"><summary>作品约束与关联人物</summary><label class="field"><span>本次不可改变的事实 / 信息边界</span><textarea name="lockedFacts" maxlength="6000" placeholder="例如：甲尚不知道乙的真实身份；不新增关键人物或反转。">${e(f.lockedFacts)}</textarea></label><div class="field"><span>关联人物（不选则按片段姓名匹配，最多 12 人）</span><div class="check-options">${state.project.characters.map(c => `<label class="check-option"><input type="checkbox" name="characterIds" value="${e(c.id)}" ${f.characterIds.includes(c.id) ? 'checked' : ''}/>${e(c.name)}</label>`).join('')}</div></div></details><label class="check-option"><input type="checkbox" name="revise" ${f.revise ? 'checked' : ''}/>根据审查意见最多修订一轮，并再次核对</label><p class="hint">使用当前同一个模型分工处理前情、写作、情节核对和文风核对。一次任务最多 ${f.revise ? '7' : '4'} 次请求；失败不自动重试。所选片段、相关作品资料与文风样例会发送到你配置的接口。</p><button class="btn primary" type="submit" ${local.submitting ? 'disabled' : ''}>生成候选稿</button></form>`;
+    return `<form id="studio-writing-form"><div class="field-row"><label class="field"><span>任务</span><select class="select" name="mode">${options([['rewrite', '改写已有片段'], ['continue', '按指引续写']], f.mode)}</select></label><label class="field"><span>使用文风</span><select class="select" name="profileId" required><option value="">请选择已确认的档案</option>${options(profiles.map(p => [p.id, p.name + ' · v' + p.version]), f.profileId)}</select></label></div>${!profiles.length ? '<p class="notice">先在“参考与文风”中分析材料，并确认一份文风档案。</p>' : ''}<div class="field-row"><label class="field"><span>正文来源</span><select class="select" name="sourceKind">${options([['chapter', '从已导入章节选择'], ['paste', '粘贴片段']], f.sourceKind)}</select></label>${f.sourceKind === 'chapter' ? `<label class="field"><span>章节</span><select class="select" name="chapterId"><option value="">请选择章节</option>${options(chapters.map(c => [c.id, c.title]), f.chapterId)}</select></label>` : `<label class="field"><span>作品资料截止章节</span><select class="select" name="cutoffId"><option value="">最新章节</option>${options(chapters.map(c => [c.id, c.title]), f.cutoffId)}</select></label>`}</div>${f.sourceKind === 'chapter' ? `<div class="studio-selection"><div class="actions">${button('载入章节', 'studio-load-chapter', 'book')}${button(f.mode === 'rewrite' ? '使用选中片段' : '从选区末尾续写', 'studio-use-selection', 'check')}${button('从本章末尾续写', 'studio-use-end', 'arrow')}</div><textarea id="studio-chapter-body" readonly aria-label="选择正文范围" placeholder="载入章节后，用鼠标选择需要处理的文字。">${e(local.chapter?.id === f.chapterId ? local.chapter.body : '')}</textarea><div id="studio-selection-status" class="hint">${selectionDescription()}</div>${selectionPreview()}</div>` : `<label class="field"><span>${f.mode === 'rewrite' ? '待改写片段' : '续写前文'}</span><textarea name="text" class="studio-input-text" maxlength="12000" placeholder="粘贴原始片段，保留段落。">${e(f.text)}</textarea></label>`}<label class="field"><span>${f.mode === 'rewrite' ? '本次改写要求（可选）' : '接下来要发生什么（必填）'}</span><textarea name="instructions" maxlength="6000" placeholder="例如：保留两人的试探，只调整对白和停顿；或指定接下来发生的事件。">${e(f.instructions)}</textarea></label><div class="field-row"><label class="field"><span>目标篇幅（约，字）</span><input class="input" name="length" type="number" min="100" max="3000" value="${e(f.length)}"/></label><label class="field"><span>表达调整程度</span><select class="select" name="intensity">${options([['light', '轻度润色'], ['medium', '明显调整'], ['strong', '重塑表达，保留指定事实']], f.intensity)}</select></label></div><label class="field"><span>${f.mode === 'continue' ? '写到哪里停止（必填）' : '范围与停止要求（可选）'}</span><input class="input" name="stopAt" maxlength="6000" value="${e(f.stopAt)}" placeholder="例如：写到对方离开，不揭露真实身份"/></label><details class="studio-details"><summary>作品约束与关联人物</summary><label class="field"><span>本次不可改变的事实 / 信息边界</span><textarea name="lockedFacts" maxlength="6000" placeholder="例如：甲尚不知道乙的真实身份；不新增关键人物或反转。">${e(f.lockedFacts)}</textarea></label><div class="field"><span>关联人物（不选则按片段姓名匹配，最多 12 人）</span><div class="check-options">${state.project.characters.map(c => `<label class="check-option"><input type="checkbox" name="characterIds" value="${e(c.id)}" ${f.characterIds.includes(c.id) ? 'checked' : ''}/>${e(c.name)}</label>`).join('')}</div></div></details><label class="check-option"><input type="checkbox" name="revise" ${f.revise ? 'checked' : ''}/>根据审查意见最多修订一轮，并再次核对</label><p class="hint">使用当前同一个模型分工处理前情、写作、情节核对和文风核对。一次任务最多 ${f.revise ? '7' : '4'} 次请求；失败不自动重试。所选片段、相关作品资料与文风样例会发送到你配置的接口。</p><button class="btn primary" type="submit" ${local.submitting ? 'disabled' : ''}>生成候选稿</button></form>`;
   }
   function selectionDescription() {
     if (!local.selection) return '尚未确认范围。改写先选中文字；续写可选择位置或从章末开始。';
     const s = local.selection;
     return `${s.mode === 'rewrite' ? `已选 ${s.end - s.start} 字符` : `从第 ${s.end} 字符后续写`} · 基于载入时的正文版本`;
+  }
+  function selectionPreview() {
+    if (!local.selection || !local.chapter || local.selection.mode !== local.form.mode) return '';
+    const { start, end, mode } = local.selection;
+    const text = mode === 'rewrite' ? local.chapter.body.slice(start, end) : local.chapter.body.slice(Math.max(0, end - 600), end);
+    return `<details class="studio-selected-preview" open><summary>${mode === 'rewrite' ? '本次改写的原文' : '续写位置前的文字'}</summary><pre>${e(text)}</pre><p class="hint">${mode === 'rewrite' ? '仅处理以上选区。' : '从以上文字之后接写，后面的原文不包含在续写前文中。'}</p></details>`;
   }
   function draftList() {
     return state.project.studio.drafts.length ? [...state.project.studio.drafts].reverse().map(d => `<article class="studio-draft"><div><h3>${e(d.title)}</h3><p>${e(d.profileSnapshot?.name || '历史文风')} · ${date(d.createdAt)} · ${d.versions.length} 个版本${d.incomplete ? ' · 审查未完成' : ''}</p><p class="draft-excerpt">${e(d.versions.at(-1).text.slice(0, 170))}</p></div><div class="actions">${button('对照与导出', 'studio-draft', 'book', true, d.id)}${button('移除', 'studio-delete-draft', 'trash', false, d.id)}</div></article>`).join('') : '<div class="studio-empty"><p>还没有保存的候选稿。</p><small>任务完成后先查看，再保存到这里。候选稿独立于正式正文。</small></div>';
@@ -133,6 +140,9 @@ export function createStudioUI(ctx) {
       form.onsubmit = submitWriting;
       form.oninput = () => { captureForm(); local.dirty = true; };
       for (const name of ['mode', 'sourceKind', 'chapterId']) form.querySelector(`[name="${name}"]`)?.addEventListener('change', () => { captureForm(); local.selection = null; render(); });
+      if (local.selection && local.chapter?.id === local.form.chapterId) {
+        const textarea = $('#studio-chapter-body'); textarea?.setSelectionRange(local.selection.start, local.selection.end);
+      }
     }
   }
   async function handleAction(act, id) {
@@ -160,7 +170,7 @@ export function createStudioUI(ctx) {
       captureForm(); if (!local.chapter || local.chapter.id !== local.form.chapterId) throw new Error('请先载入章节');
       const textarea = $('#studio-chapter-body');
       if (act === 'studio-use-end') { local.form.mode = 'continue'; local.selection = { mode: 'continue', start: local.chapter.body.length, end: local.chapter.body.length }; render(); }
-      else { const start = textarea.selectionStart, end = textarea.selectionEnd; if (local.form.mode === 'rewrite' && start === end) throw new Error('请先在正文中选择文字'); local.selection = { mode: local.form.mode, start: local.form.mode === 'continue' ? end : start, end }; $('#studio-selection-status').textContent = selectionDescription(); }
+      else { const start = textarea.selectionStart, end = textarea.selectionEnd; local.selection = writingSelection(local.chapter, local.form.mode, start, end); render(); }
       local.dirty = true;
     }
     if (act === 'studio-job') await showJob(id);
@@ -185,7 +195,20 @@ export function createStudioUI(ctx) {
     }
     return true;
   }
-  async function openForChapter(id) { local.tab = 'writing'; local.form.sourceKind = 'chapter'; local.form.chapterId = id; local.chapter = null; local.selection = null; closeModal(); navigate('studio'); await loadChapter(); }
+  async function openForChapter(id, options = {}) {
+    const chapter = await api('/api/studio/chapter?id=' + encodeURIComponent(id));
+    if (options.body !== undefined && options.body !== chapter.body) throw new Error('章节原文已更新，请重新打开章节并选择文字');
+    const selected = options.mode ? writingSelection(chapter, options.mode, options.start, options.end) : null;
+    local.tab = 'writing'; local.form.sourceKind = 'chapter'; local.form.chapterId = id;
+    if (selected) local.form.mode = selected.mode;
+    local.chapter = chapter; local.selection = selected; local.dirty = Boolean(selected);
+    closeModal(); navigate('studio');
+    if (selected) {
+      document.querySelector('[name="instructions"]')?.focus({ preventScroll: true });
+      document.querySelector('.studio-selected-preview')?.scrollIntoView({ block: 'center', behavior: 'instant' });
+      toast(selected.mode === 'rewrite' ? '已带入选中片段，填写要求后生成候选稿' : '已带入续写位置，请填写情节方向和停止位置');
+    }
+  }
   function reset() { local.jobs = []; local.configured = false; local.profileMeta = []; local.error = ''; local.chapter = null; local.selection = null; local.selectedSources.clear(); local.form.profileId = ''; local.form.text = ''; local.form.instructions = ''; local.form.lockedFacts = ''; local.form.stopAt = ''; local.form.characterIds = []; local.dirty = false; }
   return { renderPage, refresh, bind, handleAction, openForChapter, reset, local };
 }
