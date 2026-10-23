@@ -48,6 +48,21 @@ test('识别 TXT 首行和 MD 标题，正文导出避免重复标题', () => {
   const p = emptyProject(); p.chapters = [{ id: 'a', title: '第六章', body: '# 第六章\n\n正文', volume: '第一卷', order: 1 }];
   assert.equal(readingText(p).match(/第六章/g).length, 1);
 });
+test('TXT 导出去除前置卷章标题，保留正文中的标题及 TXT 字面标记', () => {
+  const p = emptyProject(); p.chapters = [
+    { id: 'a', filename: '01.md', title: '第一章 · 测试', volume: '第一卷', order: 1, body: '# 第一卷·开篇\r\n\r\n## 第一章·测试\r\n\r\n正文。\r\n\r\n第一章·测试' },
+    { id: 'b', filename: '02.txt', title: '第二章', volume: '第一卷', order: 2, body: '第二章\n\n**原样保留**\n> 这也是字面文字。' }
+  ];
+  const before = JSON.stringify(p);
+  const output = readingText(p);
+  assert.equal(output.match(/第一卷/g).length, 1);
+  assert.ok(output.startsWith('第一卷·开篇\n\n第一章 · 测试\n\n正文。'));
+  assert.ok(output.includes('正文。\r\n\r\n第一章·测试'));
+  assert.ok(output.includes('第二章\n\n**原样保留**\n> 这也是字面文字。'));
+  assert.equal(JSON.stringify(p), before);
+  assert.ok(!readingText(p, ['b']).includes('正文。'));
+});
+
 test('重复导入更新原章节并提示关联设定复核，保留自定义标题', () => {
   const p = demoProject(), originalId = p.chapters[0].id;
   p.chapters[0].title = '作者自定标题';

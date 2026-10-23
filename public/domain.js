@@ -163,10 +163,22 @@ export function mergeChapters(project, incoming) {
 export function readingText(p, ids) {
   let previousVolume = '';
   return sortChapters(p.chapters).filter(c => !ids || ids.includes(c.id)).map(c => {
-    let body = stripMarkdown(c.body).trimStart();
-    const firstLine = body.split(/\r?\n/, 1)[0];
-    if (firstLine.trim() === c.title.trim()) body = body.slice(firstLine.length).trimStart();
-    const volume = c.volume && c.volume !== previousVolume ? c.volume + '\n\n' : '';
+    const markdown = !c.filename || /\.(md|markdown)$/i.test(c.filename);
+    const titleKey = text => text.replace(/[\s·•:：—_-]/g, '');
+    let volumeTitle = c.volume;
+    if (markdown && c.volume) {
+      const heading = c.body.replace(/^\uFEFF/, '').split(/\r?\n/).filter(s => s.trim()).slice(0, 2)
+        .map(s => s.match(/^#{1,6}\s+(.+)/)?.[1]?.trim())
+        .find(s => s?.replace(/\s/g, '').startsWith(c.volume.replace(/\s/g, '')));
+      volumeTitle = heading || c.volume;
+    }
+    let body = (markdown ? stripMarkdown(c.body) : c.body).replace(/^\uFEFF/, '').trimStart();
+    while (body) {
+      const firstLine = body.split(/\r?\n/, 1)[0];
+      if (titleKey(firstLine) !== titleKey(c.title) && !(markdown && volumeTitle && titleKey(firstLine) === titleKey(volumeTitle))) break;
+      body = body.slice(firstLine.length).trimStart();
+    }
+    const volume = c.volume && c.volume !== previousVolume ? volumeTitle + '\n\n' : '';
     previousVolume = c.volume;
     return `${volume}${c.title}\n\n${body}`;
   }).join('\n\n' + '─'.repeat(30) + '\n\n');

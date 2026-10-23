@@ -202,7 +202,8 @@ export async function createApp({ dataDir = path.join(root, 'data'), port = 4317
         setTimeout(() => { server.close(); server.closeIdleConnections(); }, 100);
         return;
       }
-      if (url.pathname === '/api/project' && req.method === 'PUT') {
+      const restoringProject = url.pathname === '/api/project/restore' && req.method === 'POST';
+      if ((url.pathname === '/api/project' && req.method === 'PUT') || restoringProject) {
         const incoming = validateProject(await body(req));
         // Never persist provider credentials from an imported backup or a modified client.
         incoming.settings = { endpoint: String(incoming.settings.endpoint || ''), model: String(incoming.settings.model || ''), autoOrganize: Boolean(incoming.settings.autoOrganize) };
@@ -210,10 +211,15 @@ export async function createApp({ dataDir = path.join(root, 'data'), port = 4317
           if (incoming.revision !== project.revision) throw Object.assign(new Error('资料已在其他窗口更新。请刷新页面后重试；本次更改未覆盖已有资料。'), { status: 409 });
           const next = { ...incoming, revision: project.revision + 1, updatedAt: new Date().toISOString() };
           const before = project;
-          invalidateChapterReferences(before, next);
-          if (before.projectId !== next.projectId || before.chapters.some(c => !next.chapters.some(n => n.id === c.id && n.body === c.body))) await snapshots.create(before, before.projectId !== next.projectId ? '切换作品前保护' : '章节变更前保护');
+          if (restoringProject) {
+            await snapshots.create(before, '恢复备份前保护');
+            await ai.setPaused(true); await ai.clearSession();
+          } else {
+            invalidateChapterReferences(before, next);
+            if (before.projectId !== next.projectId || before.chapters.some(c => !next.chapters.some(n => n.id === c.id && n.body === c.body))) await snapshots.create(before, before.projectId !== next.projectId ? '切换作品前保护' : '章节变更前保护');
+          }
           await persistProject(next);
-          try { await ai.enqueueChanged(before, next); } catch { ai.lastError = '正文已保存，但自动整理任务未能建立，请手动加入任务。'; }
+          if (!restoringProject) try { await ai.enqueueChanged(before, next); } catch { ai.lastError = '正文已保存，但自动整理任务未能建立，请手动加入任务。'; }
           return next;
         };
         const result = saveQueue.then(operation);

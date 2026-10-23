@@ -134,6 +134,38 @@ test('暂停可阻止后续请求；重启保留队列但不保存密钥', async
   } finally { await f.close(); }
 });
 
+test('同一作品恢复备份保留原有复核状态，不排 AI 任务，并保护当前版本和清除会话', async () => {
+  const f = await fixture(async (payload, res) => reply(payload, res));
+  try {
+    let p = await f.request('/api/project');
+    p.chapters = [chapter('one', '甲遇见乙。')];
+    p = await f.request('/api/project', 'PUT', p);
+    const backup = structuredClone(p); backup.settings.autoOrganize = true;
+    backup.settings.apiKey = 'must-not-be-saved';
+    backup.chapters[0].summary = '原备份中已核实的摘要';
+    p.chapters[0].body = '甲向乙道谢。';
+    p = await f.request('/api/project', 'PUT', p);
+    await f.request('/api/ai/session', 'POST', f.config);
+    await assert.rejects(f.request('/api/project/restore', 'POST', backup), /其他窗口更新/);
+    assert.equal((await f.request('/api/project')).chapters[0].body, '甲向乙道谢。');
+    backup.revision = p.revision;
+    const restored = await f.request('/api/project/restore', 'POST', backup);
+    assert.equal(restored.revision, p.revision + 1);
+    assert.equal(restored.projectId, p.projectId);
+    assert.equal(restored.chapters[0].body, '甲遇见乙。');
+    assert.ok(!restored.chapters[0].summaryNeedsReview);
+    const q = await f.request('/api/ai/jobs');
+    assert.equal(q.paused, true); assert.equal(q.configured, false);
+    assert.equal(q.jobs.length, 0); assert.equal(f.requests.length, 0);
+    assert.ok(!(await readFile(path.join(f.dir, 'project.json'), 'utf8')).includes('must-not-be-saved'));
+    const snapshots = await f.request('/api/snapshots');
+    assert.ok(JSON.stringify(snapshots).includes('恢复备份前保护'));
+    await f.stop(); await f.launch();
+    assert.equal((await f.request('/api/project')).chapters[0].summary, '原备份中已核实的摘要');
+    assert.equal((await f.request('/api/ai/jobs')).paused, true);
+  } finally { await f.close(); }
+});
+
 test('恢复另一部作品不会因备份中的开关而自动发送整本正文', async () => {
   const f = await fixture(async (payload, res) => reply(payload, res));
   try {

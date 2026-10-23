@@ -10,6 +10,7 @@ const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
 const escape = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const e = escape;
+const noteDrafts = new Map();
 const state = { project: null, page: 'home', characterId: '', query: '', factionFilter: '', threadFilter: 'all', storyTab: 'threads', chapterQuery: '', exportType: 'context', saveQueue: Promise.resolve(), apiKey: '', aiBusy: false, aiQueue: {jobs: [], configured: false, paused: false}, selectedChapters: new Set(), exportOptions: {} };
 const names = { home: '故事概览', chapters: '章节原文', volumes: '分卷大纲', documents: '设定与笔记', characters: '人物档案', network: '阵营与关系', threads: '支线与灵感', ai: 'AI 资料整理', export: '导出与备份', settings: '作品设置', maintenance: '资料维护', studio: '文风工作台', reader: '沉浸阅读' };
 const statusLabels = { unprocessed: '已导入 · 未核对', pending: '待确认', done: '已核对', changed: '原文更新 · 需复核' };
@@ -71,15 +72,16 @@ async function api(url, options = {}) {
   if (!response.ok) throw new Error(data.error || '请求失败');
   return data;
 }
-function mutate(fn, message = '', redraw = true) {
+function mutate(fn, message = '', redraw = true, restoring = false) {
   const task = async () => {
     const copy = structuredClone(state.project);
     const result = fn(copy) || copy;
     validateProject(result);
     const status = $('#save-status'); if (status) status.textContent = '正在保存…';
     const previousProjectId = state.project.projectId;
-    state.project = await api('/api/project', { method: 'PUT', body: JSON.stringify(result) });
-    if (previousProjectId !== state.project.projectId) { features.reset(); studioUI.reset(); await features.refresh(); await studioUI.refresh(); }
+    state.project = await api(restoring ? '/api/project/restore' : '/api/project', { method: restoring ? 'POST' : 'PUT', body: JSON.stringify(result) });
+    if (restoring) { noteDrafts.delete(state.project.projectId); state.exportOptions = {}; }
+    if (restoring || previousProjectId !== state.project.projectId) { features.reset(); studioUI.reset(); await features.refresh(); await studioUI.refresh(); }
     if (redraw) render();
     else if (status) status.textContent = '已保存到本机';
     if (message) toast(message);
@@ -98,7 +100,7 @@ function render() {
   if (state.page === 'reader') { $('#app').innerHTML = readerUI.renderPage(); readerUI.bind(); chapterTextActions.bind(); return; }
   const p = state.project;
   const nav = [['home', '故事概览', ''], ['chapters', '章节原文', p.chapters.length], ['reader', '沉浸阅读', ''], ['volumes', '分卷大纲', p.volumes.length], ['documents', '设定与笔记', p.documents.length], ['characters', '人物档案', p.characters.length], ['network', '阵营与关系', ''], ['threads', '支线与灵感', p.threads.filter(t => t.status !== 'done').length], ['ai', 'AI 资料整理', p.review?.length || ''], ['studio', '文风工作台', ''], ['maintenance', '资料维护', reviewItems(p).length || '']];
-  $('#app').innerHTML = `<div class="shell"><aside class="sidebar"><div class="brand"><span class="brand-mark">${icon('book')}</span><div><strong>拾章</strong><small>STORY ATLAS</small></div></div><button class="book-switch" ${action('project-settings')}>${icon('book')}<div><strong>${e(p.title)}</strong><small>${p.isDemo ? '示例作品 · 可自由体验' : e(p.genre || '我的故事档案')}</small></div></button><div class="nav-label">写作工作台</div><nav class="nav">${nav.map(([key, label, count]) => `<button class="${state.page === key ? 'active' : ''}" data-page="${key}">${icon(key)}${label}${count !== '' ? `<span class="count">${count}</span>` : ''}</button>`).join('')}</nav><div class="sidebar-bottom"><nav class="nav">${['export', 'settings'].map(key => `<button class="${state.page === key ? 'active' : ''}" data-page="${key}">${icon(key)}${names[key]}</button>`).join('')}</nav><div class="local-status"><span class="dot"></span><span id="save-status">已保存到本机</span><div style="padding-left:13px;margin-top:3px">每一个故事，都有迹可循。</div></div><div class="sidebar-foot">STORY ATLAS / LOCAL EDITION 0.6.1</div></div></aside><div class="workspace"><header class="topbar"><div class="breadcrumb">${icon('book')}<span>${e(p.title)}</span><span>/</span><b>${names[state.page]}</b></div><div class="top-actions"><button class="global-search" ${action('search')}>${icon('search')}搜索人物、设定、原文<kbd>Ctrl K</kbd></button>${button('导入章节', 'import', 'plus', true)}</div></header><main class="content">${p.isDemo ? `<div class="demo-banner"><span>当前为示例作品《雾渡》，所有记录都可修改。开始使用自己的作品时，请新建作品。</span><button class="btn small ghost" ${action('new-project')}>新建我的作品 ${icon('arrow')}</button></div>` : ''}<div id="maintenance-alert">${features.alert()}</div><div id="ai-status-strip">${renderQueueStrip()}</div>${({ home: renderHome, chapters: renderChapters, volumes: renderVolumes, documents: renderDocuments, characters: renderCharacters, network: renderNetwork, threads: renderThreads, ai: renderAI, export: renderExport, settings: renderSettings, maintenance: features.renderMaintenance, studio: studioUI.renderPage }[state.page] || renderHome)()}</main></div></div>`;
+  $('#app').innerHTML = `<div class="shell"><aside class="sidebar"><div class="brand"><span class="brand-mark">${icon('book')}</span><div><strong>拾章</strong><small>STORY ATLAS</small></div></div><button class="book-switch" ${action('project-settings')}>${icon('book')}<div><strong>${e(p.title)}</strong><small>${p.isDemo ? '示例作品 · 可自由体验' : e(p.genre || '我的故事档案')}</small></div></button><div class="nav-label">写作工作台</div><nav class="nav">${nav.map(([key, label, count]) => `<button class="${state.page === key ? 'active' : ''}" data-page="${key}">${icon(key)}${label}${count !== '' ? `<span class="count">${count}</span>` : ''}</button>`).join('')}</nav><div class="sidebar-bottom"><nav class="nav">${['export', 'settings'].map(key => `<button class="${state.page === key ? 'active' : ''}" data-page="${key}">${icon(key)}${names[key]}</button>`).join('')}</nav><div class="local-status"><span class="dot"></span><span id="save-status">已保存到本机</span><div style="padding-left:13px;margin-top:3px">每一个故事，都有迹可循。</div></div><div class="sidebar-foot">STORY ATLAS / LOCAL EDITION 0.6.2</div></div></aside><div class="workspace"><header class="topbar"><div class="breadcrumb">${icon('book')}<span>${e(p.title)}</span><span>/</span><b>${names[state.page]}</b></div><div class="top-actions"><button class="global-search" ${action('search')}>${icon('search')}搜索人物、设定、原文<kbd>Ctrl K</kbd></button>${button('导入章节', 'import', 'plus', true)}</div></header><main class="content">${p.isDemo ? `<div class="demo-banner"><span>当前为示例作品《雾渡》，所有记录都可修改。开始使用自己的作品时，请新建作品。</span><button class="btn small ghost" ${action('new-project')}>新建我的作品 ${icon('arrow')}</button></div>` : ''}<div id="maintenance-alert">${features.alert()}</div><div id="ai-status-strip">${renderQueueStrip()}</div>${({ home: renderHome, chapters: renderChapters, volumes: renderVolumes, documents: renderDocuments, characters: renderCharacters, network: renderNetwork, threads: renderThreads, ai: renderAI, export: renderExport, settings: renderSettings, maintenance: features.renderMaintenance, studio: studioUI.renderPage }[state.page] || renderHome)()}</main></div></div>`;
   bindPageEvents(); features.bind(); studioUI.bind();
   chapterTextActions.bind();
 }
@@ -118,7 +120,7 @@ function renderHome() {
     <div class="dashboard-grid"><div><section class="section"><div class="section-head"><h2><span class="index">01</span>最近的章节</h2><button class="btn ghost small" data-page="chapters">全部章节 ${icon('arrow')}</button></div><div class="panel">${chapters.slice(-4).reverse().map(c => `<div class="chapter-row"><span class="chapter-number">${String(chapters.indexOf(c) + 1).padStart(2, '0')}</span><div class="chapter-info"><h3><button class="table-title" ${action('reader-open', c.id)}>${e(c.title)}</button></h3><p>${e(c.summary || '尚无摘要，可以手动记录或通过 AI 整理。')}</p></div>${statusTag(c)}<button class="icon-btn" title="查看原文" ${action('reader-open', c.id)}>${icon('arrow')}</button></div>`).join('') || empty('还没有章节', '导入章节', 'import')}</div></section>
     <section class="section"><div class="section-head"><h2><span class="index">02</span>回到人物身边</h2><button class="btn ghost small" data-page="characters">人物档案 ${icon('arrow')}</button></div><div class="people-strip">${p.characters.slice(0, 6).map((c, i) => `<button class="person-mini" ${action('person', c.id)}>${avatar(c, i % 3 === 1 ? 'alt' : '')}<div><h3>${e(c.name)}</h3><small>${e(factionNames(c).join(' · ') || '阵营未记录')}</small></div></button>`).join('') || empty('先建立第一位人物', '新建人物', 'new-character')}</div></section>
     <div class="inline-note">${icon('search')} 想起一个人物，却忘了前文怎么写的？<p>搜索姓名、别名或设定关键词，找到记录后，可以直接展开对应原文。按 Ctrl + K 开始搜索。</p></div></div>
-    <aside class="dashboard-aside"><section class="section"><div class="note-panel"><div class="note-top"><h2>${icon('note')} 停笔备忘</h2><span class="eyebrow">PICK UP HERE</span></div><textarea id="home-note" aria-label="停笔备忘" placeholder="上次停在哪里？接下来想写什么？">${e(p.note)}</textarea><div style="display:flex;align-items:center;justify-content:space-between"><small>留几句话，给下次打开文档的自己。</small><button class="btn small ghost" ${action('save-note')}>保存备忘 ${icon('check')}</button></div></div></section><section class="section"><div class="section-head"><h2><span class="index">03</span>还没写完的故事</h2><span class="tag">${active.length} 条进行中</span></div><div class="panel">${active.slice(0, 4).map(t => `<div class="thread-mini"><div class="thread-mini-top"><h3><button class="table-title" ${action('edit-thread', t.id)}>${e(t.title)}</button></h3>${icon('threads')}</div><p>${e(t.description.slice(0, 78))}${t.description.length > 78 ? '…' : ''}</p><div class="linked-list" style="margin-top:8px">${t.characterIds.slice(0, 3).map(personChip).join('')}</div></div>`).join('') || empty('没有进行中的支线', '记录支线', 'new-thread')}</div></section></aside></div>`;
+    <aside class="dashboard-aside"><section class="section"><div class="note-panel"><div class="note-top"><h2>${icon('note')} 停笔备忘</h2><span class="eyebrow">PICK UP HERE</span></div><textarea id="home-note" aria-label="停笔备忘" placeholder="上次停在哪里？接下来想写什么？">${e(noteDrafts.get(p.projectId) ?? p.note)}</textarea><div style="display:flex;align-items:center;justify-content:space-between"><small id="home-note-hint">${noteDrafts.has(p.projectId) && noteDrafts.get(p.projectId) !== p.note ? '备忘尚未保存，切换页面会保留草稿。' : '留几句话，给下次打开文档的自己。'}</small><button class="btn small ghost" ${action('save-note')}>保存备忘 ${icon('check')}</button></div></div></section><section class="section"><div class="section-head"><h2><span class="index">03</span>还没写完的故事</h2><span class="tag">${active.length} 条进行中</span></div><div class="panel">${active.slice(0, 4).map(t => `<div class="thread-mini"><div class="thread-mini-top"><h3><button class="table-title" ${action('edit-thread', t.id)}>${e(t.title)}</button></h3>${icon('threads')}</div><p>${e(t.description.slice(0, 78))}${t.description.length > 78 ? '…' : ''}</p><div class="linked-list" style="margin-top:8px">${t.characterIds.slice(0, 3).map(personChip).join('')}</div></div>`).join('') || empty('没有进行中的支线', '记录支线', 'new-thread')}</div></section></aside></div>`;
 }
 
 function renderChapters() {
@@ -427,9 +429,9 @@ async function restoreProject() {
   const [file] = await chooseFiles('.json'); if (!file) return;
   if (file.size > 70 * 1024 * 1024) throw new Error('备份文件超过 70 MB，无法通过本版界面恢复');
   const imported = validateProject(JSON.parse((await file.text()).replace(/^\uFEFF/, '')));
-  const dialog = openModal('恢复项目备份', `<p>将恢复「${e(imported.title)}」。</p><p class="hint">包含 ${imported.chapters.length} 章、${imported.characters.length} 位人物、${imported.threads.length} 条支线。当前作品会先下载备份，再由恢复内容替换。</p>`, '<button class="btn" data-action="close-modal">取消</button><button class="btn primary" id="confirm-restore">备份当前作品并恢复</button>');
+  const dialog = openModal('恢复项目备份', `<p>将恢复「${e(imported.title)}」。</p><p class="hint">包含 ${imported.chapters.length} 章、${imported.characters.length} 位人物、${imported.threads.length} 条支线。当前作品会先下载备份并建立本机保护快照，再由恢复内容替换；AI 队列会暂停，会话密钥会清除。</p>`, '<button class="btn" data-action="close-modal">取消</button><button class="btn primary" id="confirm-restore">备份当前作品并恢复</button>');
   $('#confirm-restore', dialog).onclick = async () => {
-    try { backup(); await mutate(p => ({ ...imported, revision: p.revision, settings: { endpoint: imported.settings.endpoint, model: imported.settings.model, autoOrganize: Boolean(imported.settings.autoOrganize) } }), '项目已恢复'); state.selectedChapters.clear(); state.characterId = ''; state.apiKey = ''; closeModal(); navigate('home'); } catch (error) { modalError(error); }
+    try { backup(); await mutate(p => ({ ...imported, revision: p.revision, settings: { endpoint: imported.settings.endpoint, model: imported.settings.model, autoOrganize: Boolean(imported.settings.autoOrganize) } }), '项目已恢复，AI 队列已暂停', true, true); await refreshAIQueue(); state.selectedChapters.clear(); state.characterId = ''; state.apiKey = ''; closeModal(); navigate('home'); } catch (error) { modalError(error); }
   };
 }
 function replaceProject(demo = false) {
@@ -561,6 +563,7 @@ function refreshExportPreview() {
   const text = getExportText(); $('#export-preview').textContent = getExportPreviewText(); $('#export-size').textContent = `${formatCount(text.length)} 字符`;
 }
 function bindPageEvents() {
+  $('#home-note')?.addEventListener('input', event => { noteDrafts.set(state.project.projectId, event.target.value); const hint = $('#home-note-hint'); if (hint) hint.textContent = event.target.value !== state.project.note ? '备忘尚未保存，切换页面会保留草稿。' : '留几句话，给下次打开文档的自己。'; });
   const reRenderInput = (id, key) => {
     const el = $(id); if (!el) return;
     el.addEventListener('input', event => { const selection = event.target.selectionStart; state[key] = event.target.value; render(); const fresh = $(id); fresh?.focus(); fresh?.setSelectionRange(selection, selection); });
@@ -616,7 +619,7 @@ document.addEventListener('click', async event => {
     if (act === 'new-fact') return factForm(id);
     if (act === 'edit-fact') return factForm(person, id);
     if (act === 'delete-fact') { await mutate(p => { const c = p.characters.find(c => c.id === person); c.facts = c.facts.filter(f => f.id !== id); }, '人物记录已删除'); return closeModal(); }
-    if (act === 'save-note') { const note = $('#home-note').value; return await mutate(p => { p.note = note; }, '停笔备忘已保存', false); }
+    if (act === 'save-note') { const note = $('#home-note').value, projectId = state.project.projectId; await mutate(p => { p.note = note; }, '停笔备忘已保存', false); if (noteDrafts.get(projectId) === note) { noteDrafts.delete(projectId); const hint = $('#home-note-hint'); if (hint && state.project.projectId === projectId) hint.textContent = '留几句话，给下次打开文档的自己。'; } return; }
     if (act === 'ai-selected') { if (!state.selectedChapters.size) throw new Error('请先勾选需要整理的章节'); return navigate('ai'); }
     if (act === 'select-unprocessed') { state.selectedChapters = new Set(sortChapters(state.project.chapters).filter(c => c.status !== 'done').slice(0, 5).map(c => c.id)); return render(); }
     if (act === 'clear-ai-selection') { state.selectedChapters.clear(); return render(); }
@@ -652,7 +655,7 @@ document.addEventListener('keydown', event => {
 });
 window.addEventListener('beforeunload', event => {
   readerUI.flush();
-  if (($('#home-note') && $('#home-note').value !== state.project.note) || studioUI.local.dirty) { event.preventDefault(); event.returnValue = ''; }
+  if ((noteDrafts.has(state.project?.projectId) && noteDrafts.get(state.project.projectId) !== state.project.note) || studioUI.local.dirty) { event.preventDefault(); event.returnValue = ''; }
 });
 
 const chapterTextActions = createChapterTextActions({ state, e, toast, onOpen: (id, options) => studioUI.openForChapter(id, options) });
