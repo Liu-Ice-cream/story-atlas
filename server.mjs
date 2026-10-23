@@ -3,7 +3,7 @@ import { readFile, writeFile, mkdir, rename, copyFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { emptyProject, validateProject } from './public/domain.js';
-import { normalizeAIConfig, requestExtraction } from './ai-provider.mjs';
+import { normalizeAIConfig, requestExtraction, testAIConnection } from './ai-provider.mjs';
 import { AIQueue } from './ai-queue.mjs';
 import { Snapshots } from './snapshots.mjs';
 import { SourceDirectory } from './source-directory.mjs';
@@ -161,6 +161,11 @@ export async function createApp({ dataDir = path.join(root, 'data'), port = 4317
         return json(res, 200, await result);
       }
       if (url.pathname === '/api/ai/jobs' && req.method === 'GET') return json(res, 200, ai.list());
+      if (url.pathname === '/api/ai/test' && req.method === 'POST') {
+        await body(req);
+        if (!ai.session) throw new Error('请先保存接口配置，再测试接口');
+        return json(res, 200, await testAIConnection({ ...ai.session }));
+      }
       if (url.pathname === '/api/ai/session' && req.method === 'POST') return json(res, 200, await ai.setSession(await body(req)));
       if (url.pathname === '/api/ai/session' && req.method === 'DELETE') return json(res, 200, await ai.clearSession());
       if (url.pathname === '/api/ai/paused' && req.method === 'POST') return json(res, 200, await ai.setPaused((await body(req)).paused));
@@ -234,7 +239,7 @@ export async function createApp({ dataDir = path.join(root, 'data'), port = 4317
       if (url.pathname.startsWith('/api/')) return json(res, 404, { error: '接口不存在' });
       if (req.method !== 'GET' && req.method !== 'HEAD') return json(res, 405, { error: '不支持的请求方法' });
       const staticName = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
-      if (!['index.html', 'app.js', 'styles.css', 'domain.js', 'maintenance.js', 'features.js', 'studio-domain.js', 'studio-ui.js', 'reader-domain.js', 'reader-ui.js', 'reader.css', 'chapter-text.js'].includes(staticName)) return json(res, 404, { error: '文件不存在' });
+      if (!['index.html', 'app.js', 'styles.css', 'domain.js', 'maintenance.js', 'features.js', 'studio-domain.js', 'studio-ui.js', 'style-sampling.js', 'reader-domain.js', 'reader-ui.js', 'reader.css', 'chapter-text.js'].includes(staticName)) return json(res, 404, { error: '文件不存在' });
       const contents = await readFile(path.join(root, 'public', staticName));
       res.writeHead(200, {
         'Content-Type': contentTypes[path.extname(staticName)], 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff',

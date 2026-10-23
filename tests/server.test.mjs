@@ -72,6 +72,39 @@ test('软件内 AI 使用兼容接口，返回结果等待确认，密钥不落�
   }
 });
 
+test('接口自检使用已保存会话，只发送固定短测试，检查 JSON 且不保存密钥', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'story-atlas-test-'));
+  const seen = []; let responseBody = '{"ok":true}', status = 200;
+  const upstream = http.createServer(async (req, res) => {
+    let body = ''; for await (const chunk of req) body += chunk;
+    seen.push({ payload: JSON.parse(body), authorization: req.headers.authorization });
+    res.writeHead(status, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ choices: [{ message: { content: responseBody } }] }));
+  });
+  let server;
+  try {
+    await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve));
+    server = await createApp({ dataDir: dir }); await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const post = (url, data = {}) => fetch(base + url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) });
+    assert.equal((await post('/api/ai/test')).status, 400);
+    const before = await (await fetch(base + '/api/project')).text();
+    await post('/api/ai/session', { endpoint: `http://127.0.0.1:${upstream.address().port}/v1`, model: 'check-model', apiKey: 'connection-test-secret' });
+    let r = await post('/api/ai/test'); assert.equal(r.status, 200);
+    const result = await r.json(); assert.equal(result.ok, true); assert.equal(result.jsonCompatible, true);
+    assert.equal(seen[0].authorization, 'Bearer connection-test-secret');
+    assert.equal(seen[0].payload.max_tokens, 128); assert.equal(seen[0].payload.model, 'check-model');
+    assert.ok(JSON.stringify(seen[0].payload.messages).length < 300);
+    responseBody = '接口连通，但不是 JSON'; r = await post('/api/ai/test'); assert.equal((await r.json()).jsonCompatible, false);
+    status = 401; r = await post('/api/ai/test'); assert.equal(r.status, 400); assert.match((await r.json()).error, /HTTP 401/);
+    assert.equal(await (await fetch(base + '/api/project')).text(), before);
+    assert.ok(!(await readFile(path.join(dir, 'ai-jobs.json'), 'utf8')).includes('connection-test-secret'));
+  } finally {
+    for (const s of [server, upstream]) if (s?.listening) { s.closeAllConnections(); await new Promise(resolve => s.close(resolve)); }
+    await cleanTestDir(dir);
+  }
+});
+
 test('停止服务接口需要确认并等待保存后正常关闭', async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), 'story-atlas-test-'));
   const server = await createApp({ dataDir: dir });

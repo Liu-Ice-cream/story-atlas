@@ -1,4 +1,5 @@
-export const PROMPT_VERSION = '1.0.0';
+import { SOURCE_MAX_CHARS, SOURCE_TOTAL_CHARS } from './style-sampling.js';
+export const PROMPT_VERSION = '1.1.0';
 export const AGENTS = {
   style: { name: '文风分析', responsibility: '从参考材料提炼有出处、可编辑的表达规则。', prompt: `你是文风分析员。仅分析用户提供的参考材料，不续写小说。
 职责：分析句法与段落、视角、描写、对话、节奏和修辞。区分共同习惯与特定场景写法。每条规则附一段连续原文和 sourceId；证据不足时在 uncertainty 说明，不虚构规律。
@@ -9,6 +10,7 @@ export const AGENTS = {
 返回 selectedIds 和 missing。只能选资料池内的编号，缺失信息写入 missing。不得推断未来剧情，不从文风参考材料提取作品事实。不生成正文。仅输出约定 JSON。` },
   writer: { name: '片段写作', responsibility: '按作者意图和已确认文风生成候选稿。', prompt: `你是小说片段编辑。只生成作者请求范围内的候选稿。
 调整程度：light 主要调整词句，medium 可调整段落与节奏，strong 可重构表达但仍须保留作者要求的事件和事实。after 是衔接所需的后文，不可将其中尚未发生的内容提前揭露。
+文风参考程度 referenceLevel：light 保留原本表达，以所选文风局部调整措辞、停顿和节奏；strong 在表达调整程度允许的范围内充分采用所选写法。两者均保留原有叙述视角、人物口吻和情节事实。每次仅采用本次指定的一份文风，不混入历史任务的其他文风。
 改写：保留已给定的事件、人物关系、视角和关键信息，按调整程度改变表达。
 续写：依照作者指定的事件方向、停止位置与篇幅接写，不复述已提供的前文。不自行揭露秘密或加入关键反转。
 作品事实和本次明确约束须遵守；发生冲突时在 unresolved 中说明。文风只影响表达，参考材料的人名、世界观和独特句子不可移植到目标作品。保留不同人物的说话差异。
@@ -19,6 +21,7 @@ export const AGENTS = {
 缺少证据用 uncertain，允许未发现问题。避免凭个人偏好批评表达。仅输出 status、issues、notes 的 JSON。` },
   styleReview: { name: '文风核对', responsibility: '检查具体写法、场景适配和机械模仿。', prompt: `你是文风审查员。只按作者已确认、启用的规则和样例评价候选稿。
 检查句法、段落、视角、对话和节奏的具体偏差，以及机械堆砌短句、修辞或照搬样例。保留人物自身口吻，不追求每句话都像同一个叙述者。
+按 referenceLevel 核对：light 允许保留作者原本表达，不因未全面模仿而提出修改；strong 才要求更充分体现所选写法。人物口吻与叙述视角优先保留。
 每个问题给出 severity（blocking/suggestion/uncertain）、quote（候选稿连续原文，整体问题可为空）、message、suggestion、referenceIds（只能使用已给出的规则编号）。
 不要添加新的审美标准，不做整体重写；允许未发现问题和无法判断。仅输出 status、issues、notes 的 JSON。` }
 };
@@ -35,10 +38,10 @@ export function validateStudio(p) {
     for (const x of s[key]) { if (!x || typeof x.id !== 'string' || !x.id || ids.has(x.id)) throw new Error('文风资料编号重复或缺失'); ids.add(x.id); }
   }
   let size = 0;
-  for (const source of s.sources) { string(source.name, '参考文档名', 500); string(source.body, '参考文档', 200000); string(source.scene || '', '场景标签', 100); size += source.body.length; }
-  if (size > 2000000) throw new Error('参考材料合计超过 200 万字符，请精简材料');
+  for (const source of s.sources) { string(source.name, '参考文档名', 500); string(source.body, '参考文档', SOURCE_MAX_CHARS); string(source.scene || '', '场景标签', 100); size += source.body.length; }
+  if (size > SOURCE_TOTAL_CHARS) throw new Error('参考材料合计超过 1200 万字符，请精简材料');
   for (const profile of s.profiles) {
-    string(profile.name, '文风档案名', 200); string(profile.overview, '文风概览', 10000);
+    string(profile.name, '文风档案名', 200); string(profile.overview, '文风概览', 10000); string(profile.usage || '', '文风适用场景', 500);
     if (!Array.isArray(profile.rules) || profile.rules.length > 40 || !Array.isArray(profile.examples) || profile.examples.length > 12) throw new Error('文风规则或样例无效');
     for (const rule of profile.rules) { string(rule.id, '规则编号', 200); string(rule.rule, '文风规则', 2000); string(rule.quote, '规则证据', 4000); string(rule.sourceId, '证据编号', 200); if (!ruleCategories[rule.category] || !['keep', 'soften', 'off'].includes(rule.weight)) throw new Error('文风规则设置无效'); }
     for (const example of profile.examples) { string(example.quote, '文风样例', 5000); string(example.sourceId, '样例来源', 200); }
@@ -75,7 +78,7 @@ export function parseStyleAnalysis(text, sources) {
 }
 export function profileForGeneration(profile) {
   if (!profile?.approved) throw new Error('请先确认文风档案');
-  return { id: profile.id, name: profile.name, version: profile.version, overview: profile.overview, rules: profile.rules.filter(r => r.weight !== 'off').map(r => ({ id: r.id, category: r.category, rule: r.rule, strength: r.weight === 'soften' ? '适度参考' : '重点遵循', scope: r.scope, scene: r.scene })), examples: profile.examples.filter(e => e.enabled !== false).slice(0, 5).map(e => ({ quote: e.quote, scene: e.scene })) };
+  return { id: profile.id, name: profile.name, usage: profile.usage || '', version: profile.version, overview: profile.overview, rules: profile.rules.filter(r => r.weight !== 'off').map(r => ({ id: r.id, category: r.category, rule: r.rule, strength: r.weight === 'soften' ? '适度参考' : '重点遵循', scope: r.scope, scene: r.scene })), examples: profile.examples.filter(e => e.enabled !== false).slice(0, 5).map(e => ({ quote: e.quote, scene: e.scene })) };
 }
 export function parseReview(text, candidate, allowedIds) {
   const r = parseObject(text);

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { AGENTS, PROMPT_VERSION, resolvedPrompts, parseStyleAnalysis, parseObject, parseReview, profileForGeneration } from './public/studio-domain.js';
 import { characterTimeline } from './public/maintenance.js';
 import { sortChapters } from './public/domain.js';
+import { analysisSamples, SAMPLING_VERSION } from './public/style-sampling.js';
 
 export const digest = text => createHash('sha256').update(text).digest('hex');
 export const profileStale = (profile, p) => (profile.sourceManifest || []).some(s => digest(p.studio.sources.find(x => x.id === s.id)?.body || '') !== s.hash);
@@ -9,13 +10,16 @@ export function captureAnalysis(p, data) {
   if (!Array.isArray(data.sourceIds) || !data.sourceIds.length) throw new Error('请选择参考文档');
   const sources = p.studio.sources.filter(s => data.sourceIds.includes(s.id));
   if (sources.length !== new Set(data.sourceIds).size || sources.length > 12) throw new Error('参考材料选择无效，一次最多 12 份');
-  if (sources.reduce((n, s) => n + s.body.length, 0) > 65000) throw new Error('本次分析材料超过 6.5 万字符，请选取代表性片段');
-  if (sources.some(s => s.body.trim().length < 30)) throw new Error('参考材料过短，请至少提供一段完整文字');
-  return { type: 'analysis', sources: structuredClone(sources), promptVersion: PROMPT_VERSION, promptRevision: p.studio.promptRevision, prompts: resolvedPrompts(p) };
+  if (data.samplingVersion != null && data.samplingVersion !== SAMPLING_VERSION) throw new Error('抽样规则已更新，请重新预览');
+  const sampling = analysisSamples(sources, data.sampleBudget == null ? {} : { budget: data.sampleBudget });
+  if (data.profileName != null && (typeof data.profileName !== 'string' || data.profileName.length > 200)) throw new Error('文风档案名称须在 200 字符以内');
+  const manifest = sources.map(s => ({ id: s.id, name: s.name, hash: digest(s.body), fullLength: s.body.length }));
+  return { type: 'analysis', profileName: data.profileName?.trim() || '', sources: sampling.samples.flatMap(s => s.parts), sourceManifest: manifest, sampling: { version: sampling.version, budget: sampling.budget, fullLength: sampling.fullLength, sampleLength: sampling.sampleLength, sources: sampling.samples.map(({ parts, ...s }) => s) }, promptVersion: PROMPT_VERSION, promptRevision: p.studio.promptRevision, prompts: resolvedPrompts(p) };
 }
 export function captureWriting(p, data) {
   if (!['rewrite', 'continue'].includes(data.mode)) throw new Error('请选择改写或续写');
   const profile = profileForGeneration(p.studio.profiles.find(x => x.id === data.profileId));
+  if (data.referenceLevel != null && !['light', 'strong'].includes(data.referenceLevel)) throw new Error('请选择有效的文风参考程度');
   const length = Number(data.length || 600);
   if (!Number.isInteger(length) || length < 100 || length > 3000) throw new Error('目标篇幅须为 100—3000 字');
   for (const key of ['instructions', 'lockedFacts', 'stopAt']) if (typeof (data[key] || '') !== 'string' || (data[key] || '').length > 6000) throw new Error('写作要求格式无效或过长');
@@ -64,11 +68,11 @@ export function captureWriting(p, data) {
   // Hard cap keeps a long novel's context bounded; author-locked facts are always included separately.
   const bounded = []; let chars = 0;
   for (const entry of pool) { const size = JSON.stringify(entry).length; if (chars + size > 36000) break; bounded.push(entry); chars += size; }
-  return { type: 'writing', mode: data.mode, profile, original, before, after, source, cutoffTitle: cutoff?.title || '无作品资料', pool: bounded, characterNames: characters.map(c => c.name), instructions: (data.instructions || '').trim(), lockedFacts: (data.lockedFacts || '').trim(), stopAt: (data.stopAt || '').trim(), length, intensity: ['light', 'medium', 'strong'].includes(data.intensity) ? data.intensity : 'light', revise: data.revise !== false, promptVersion: PROMPT_VERSION, promptRevision: p.studio.promptRevision, prompts: resolvedPrompts(p) };
+  return { type: 'writing', mode: data.mode, profile, original, before, after, source, cutoffTitle: cutoff?.title || '无作品资料', pool: bounded, characterNames: characters.map(c => c.name), instructions: (data.instructions || '').trim(), lockedFacts: (data.lockedFacts || '').trim(), stopAt: (data.stopAt || '').trim(), length, referenceLevel: data.referenceLevel || 'light', intensity: ['light', 'medium', 'strong'].includes(data.intensity) ? data.intensity : 'light', revise: data.revise !== false, promptVersion: PROMPT_VERSION, promptRevision: p.studio.promptRevision, prompts: resolvedPrompts(p) };
 }
 export function jobOutdated(job, p) {
   if (p.projectId !== job.projectId) return true;
-  if (job.input.type === 'analysis') return job.input.sources.some(s => digest(p.studio.sources.find(x => x.id === s.id)?.body || '') !== digest(s.body));
+  if (job.input.type === 'analysis') return (job.input.sourceManifest || job.input.sources.map(s => ({ id: s.id, hash: digest(s.body) }))).some(s => digest(p.studio.sources.find(x => x.id === s.id)?.body || '') !== s.hash);
   return job.input.source.kind === 'chapter' && digest(p.chapters.find(c => c.id === job.input.source.chapterId)?.body || '') !== job.input.source.bodyHash;
 }
 export function styleCopyWarnings(text, input) {
@@ -99,7 +103,14 @@ export async function executeStudio(job, call, persist) {
     } catch (error) { job.steps[id].status = 'failed'; job.steps[id].error = error.message; await persist(); throw error; }
   };
   if (input.type === 'analysis') {
-    job.result = await step('style', 'style', { task: '分析所选材料的文风', sources: input.sources, schema: '{name,overview,uncertainty,rules:[{category:"syntax|perspective|description|dialogue|rhythm|rhetoric|other",rule,scope:"general|scene",scene,sourceId,quote}],examples:[{sourceId,quote,scene}]}' }, text => parseStyleAnalysis(text, input.sources));
+    job.result = await step('style', 'style', { task: '分析所选材料的文风；不同样本为不连续原文，分别核对出处。仅依据这些样本归纳，不声称已读完整本书。', sources: input.sources, sampling: input.sampling, schema: '{name,overview,uncertainty,rules:[{category:"syntax|perspective|description|dialogue|rhythm|rhetoric|other",rule,scope:"general|scene",scene,sourceId,quote}],examples:[{sourceId,quote,scene}]}' }, text => {
+      const result = parseStyleAnalysis(text, input.sources);
+      if (input.profileName) result.name = input.profileName;
+      // Keep original document IDs for the editable library; verify against the
+      // actual samples first, so quotes from unsent parts cannot be accepted.
+      for (const item of [...result.rules, ...result.examples]) { const source = input.sources.find(s => s.id === item.sourceId); item.sampleStart = source.start; item.sampleEnd = source.end; item.sourceId = source.originalSourceId || source.id; }
+      return result;
+    });
     return;
   }
   const chosen = await step('context', 'context', { task: '为本次片段任务选择相关资料编号', mode: input.mode, instructions: input.instructions, lockedFacts: input.lockedFacts, original: input.original, before: input.before, cutoff: input.cutoffTitle, pool: input.pool, schema: '{"selectedIds":["池中编号"],"missing":["缺失信息"]}' }, text => {
@@ -108,13 +119,13 @@ export async function executeStudio(job, call, persist) {
     return { selectedIds: [...new Set(r.selectedIds)], missing: r.missing.slice(0, 20).map(x => x.slice(0, 1000)) };
   });
   const facts = input.pool.filter(x => chosen.selectedIds.includes(x.id) || x.id.startsWith('state:'));
-  const common = { mode: input.mode, instructions: input.instructions, lockedFacts: input.lockedFacts, stopAt: input.stopAt, targetLength: input.length, intensity: input.intensity, original: input.original, before: input.before, after: input.after, facts, missing: chosen.missing, profile: input.profile };
+  const common = { mode: input.mode, instructions: input.instructions, lockedFacts: input.lockedFacts, stopAt: input.stopAt, targetLength: input.length, intensity: input.intensity, referenceLevel: input.referenceLevel || 'light', original: input.original, before: input.before, after: input.after, facts, missing: chosen.missing, profile: input.profile };
   const parseWriting = text => { const r = parseObject(text); if (typeof r.text !== 'string' || !r.text.trim() || r.text.length > 40000 || !Array.isArray(r.unresolved) || r.unresolved.some(x => typeof x !== 'string')) throw new Error('写作 Agent 返回格式无效或正文超过 4 万字符'); return { text: r.text, notes: String(r.notes || '').slice(0, 3000), unresolved: r.unresolved.slice(0, 20).map(x => x.slice(0, 1000)) }; };
   const initial = await step('write', 'writer', { ...common, schema: writingSchema }, parseWriting);
   const review = async (suffix, text) => {
     const results = await Promise.allSettled([
       step('continuity' + suffix, 'continuity', { task: '核对候选稿情节一致性', ...common, profile: undefined, candidate: text, schema: reviewSchema }, r => parseReview(r, text, facts.map(x => x.id))),
-      step('styleReview' + suffix, 'styleReview', { task: '核对候选稿文风', instructions: input.instructions, mode: input.mode, profile: input.profile, candidate: text, original: input.original, schema: reviewSchema }, r => parseReview(r, text, input.profile.rules.map(x => x.id)))
+      step('styleReview' + suffix, 'styleReview', { task: '核对候选稿文风', instructions: input.instructions, mode: input.mode, referenceLevel: input.referenceLevel || 'light', profile: input.profile, candidate: text, original: input.original, schema: reviewSchema }, r => parseReview(r, text, input.profile.rules.map(x => x.id)))
     ]);
     const failed = results.find(r => r.status === 'rejected'); if (failed) throw failed.reason;
     return { continuity: results[0].value, style: results[1].value };
