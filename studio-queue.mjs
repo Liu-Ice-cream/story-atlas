@@ -4,6 +4,7 @@ import path from 'node:path';
 import { requestChat } from './ai-provider.mjs';
 import { captureAnalysis, captureWriting, executeStudio, jobOutdated, digest } from './studio-engine.mjs';
 import { AGENTS, PROMPT_VERSION, resolvedPrompts } from './public/studio-domain.js';
+import { captureSceneIndex } from './scene-engine.mjs';
 
 export class StudioQueue {
   constructor(dataDir, getProject, getSession) {
@@ -27,7 +28,7 @@ export class StudioQueue {
     this.writes = task.catch(() => { this.error = '文风任务保存失败，请检查本机磁盘'; }); return task;
   }
   metadata(job) {
-    return { id: job.id, type: job.input.type, mode: job.input.mode || '', title: job.title, status: job.status, error: job.error, calls: job.calls, createdAt: job.createdAt, updatedAt: job.updatedAt, collected: Boolean(job.collected), outdated: jobOutdated(job, this.getProject()), steps: Object.fromEntries(Object.entries(job.steps).map(([id, s]) => [id, { role: s.role, status: s.status, attempts: s.attempts, error: s.error, usage: s.usage }])), hasResult: Boolean(job.result), model: job.model };
+    return { id: job.id, type: job.input.type, mode: job.input.mode || '', title: job.title, status: job.status, error: job.error, calls: job.calls, totalBatches: job.input.totalBatches || 0, createdAt: job.createdAt, updatedAt: job.updatedAt, collected: Boolean(job.collected), outdated: jobOutdated(job, this.getProject()), steps: Object.fromEntries(Object.entries(job.steps).map(([id, s]) => [id, { role: s.role, status: s.status, attempts: s.attempts, error: s.error, usage: s.usage, reused: Boolean(s.reused) }])), hasResult: Boolean(job.result), model: job.model };
   }
   list() { const p = this.getProject(); return { jobs: this.jobs.filter(j => j.projectId === p.projectId).slice(-100).reverse().map(j => this.metadata(j)), configured: Boolean(this.getSession()), error: this.error }; }
   detail(id) {
@@ -42,8 +43,8 @@ export class StudioQueue {
     const duplicate = data.clientRequestId && this.jobs.find(j => j.projectId === p.projectId && j.clientRequestId === data.clientRequestId);
     if (duplicate) return this.metadata(duplicate);
     if (data.projectId !== p.projectId || data.revision !== p.revision) throw Object.assign(new Error('作品已更新，请刷新后重新选择素材或片段'), { status: 409 });
-    const input = data.type === 'analysis' ? captureAnalysis(p, data) : data.type === 'writing' ? captureWriting(p, data) : (() => { throw new Error('未知文风任务类型'); })();
-    const job = { id: randomUUID(), projectId: p.projectId, projectRevision: p.revision, title: input.type === 'analysis' ? '分析：' + input.sources.map(s => s.name).join('、').slice(0, 160) : (input.mode === 'rewrite' ? '改写：' : '续写：') + input.source.title, input, status: 'queued', steps: {}, calls: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), error: '', model: this.getSession().model, audit: { promptVersion: PROMPT_VERSION, promptRevision: p.studio.promptRevision, promptHash: digest(JSON.stringify(resolvedPrompts(p))) } };
+    const input = data.type === 'scene-index' ? captureSceneIndex(p, data) : data.type === 'analysis' ? captureAnalysis(p, data) : data.type === 'writing' ? captureWriting(p, data) : (() => { throw new Error('未知文风任务类型'); })();
+    const job = { id: randomUUID(), projectId: p.projectId, projectRevision: p.revision, title: ['scene-index', 'analysis'].includes(input.type) ? (input.type === 'scene-index' ? '场景识别：' : input.analysisMode === 'scenes' ? '专项分析：' : '分析：') + (input.sourceManifest || input.sources).map(s => s.name).join('、').slice(0, 160) : (input.mode === 'rewrite' ? '改写：' : '续写：') + input.source.title, input, status: 'queued', steps: {}, calls: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), error: '', model: this.getSession().model, audit: { promptVersion: PROMPT_VERSION, promptRevision: p.studio.promptRevision, promptHash: digest(JSON.stringify(resolvedPrompts(p))) } };
     job.clientRequestId = data.clientRequestId || '';
     job.endpoint = this.getSession().endpoint;
     this.jobs.push(job); await this.persist(); this.kick(); return this.metadata(job);
@@ -87,7 +88,7 @@ export class StudioQueue {
           const response = await requestChat([{ role: 'system', content: boundary + '\n' + prompt }, { role: 'user', content: JSON.stringify(payload) }], config, this.abort.signal);
           if (config.apiKey) response.content = response.content.replaceAll(config.apiKey, '[密钥已隐藏]');
           return response;
-        }, persist);
+        }, persist, key => { for (const previous of this.jobs) for (const step of Object.values(previous.steps)) if (step.cacheKey === key && step.status === 'done') return step; return null; });
         if (job.status !== 'cancelled') job.status = jobOutdated(job, this.getProject()) ? 'outdated' : 'ready';
       } catch (error) {
         if (job.status !== 'cancelled') job.status = 'failed';
@@ -103,11 +104,22 @@ export class StudioQueue {
     const job = this.jobs.find(j => j.id === id && j.projectId === project.projectId);
     if (!job?.result || ['queued', 'running'].includes(job.status)) throw new Error('任务尚未产生可保存的结果');
     if (jobOutdated(job, project)) throw new Error('原文或参考材料已改变，请新建任务；旧结果仍可查看');
-    if (job.input.type === 'analysis') {
-      if (!project.studio.profiles.some(p => p.sourceJobId === id)) project.studio.profiles.push({ ...structuredClone(job.result), id: randomUUID(), sourceJobId: id, version: 1, approved: false, createdAt: new Date().toISOString(), sourceManifest: job.input.sourceManifest || job.input.sources.map(s => ({ id: s.id, name: s.name, hash: digest(s.body) })), sampling: job.input.sampling, audit: job.audit });
+    if (job.input.type === 'scene-index') {
+      if (job.status !== 'ready') throw new Error('请等待场景索引全部完成后保存');
+      for (const index of job.result.indexes) {
+        const existing = project.studio.sceneIndexes.find(i => i.sourceId === index.sourceId);
+        if (existing?.sourceJobId === id) continue;
+        const prior = job.input.priorIndexVersions?.find(i => i.sourceId === index.sourceId);
+        if (prior && prior.version !== (existing?.version || 0)) throw new Error('识别期间分类已被修改，请保留人工分类或重新建立索引');
+        if (existing && existing.sourceHash === index.sourceHash && JSON.stringify(existing.paragraphs) === JSON.stringify(index.paragraphs)) continue;
+        const next = { ...structuredClone(index), sourceJobId: id, version: (existing?.version || 0) + 1 };
+        if (existing) Object.assign(existing, next); else project.studio.sceneIndexes.push(next);
+      }
+    } else if (job.input.type === 'analysis') {
+      if (!project.studio.profiles.some(p => p.sourceJobId === id)) project.studio.profiles.push({ ...structuredClone(job.result), id: randomUUID(), sourceJobId: id, version: 1, approved: false, createdAt: new Date().toISOString(), sourceManifest: job.input.sourceManifest || job.input.sources.map(s => ({ id: s.id, name: s.name, hash: digest(s.body) })), indexManifest: job.input.indexManifest, sampling: job.input.sampling, audit: job.audit });
     } else {
       const previous = project.studio.drafts.find(d => d.sourceJobId === id);
-      const draft = { id: previous?.id || randomUUID(), sourceJobId: id, title: job.title, mode: job.input.mode, profileId: job.input.profile.id, profileSnapshot: job.input.profile, original: job.input.original, before: job.input.before, after: job.input.after, source: job.input.source, instructions: job.input.instructions, lockedFacts: job.input.lockedFacts, stopAt: job.input.stopAt, cutoffTitle: job.input.cutoffTitle, ...structuredClone(job.result), incomplete: job.status !== 'ready', model: job.model, endpoint: job.endpoint, calls: job.calls, audit: job.audit, promptSnapshot: job.input.prompts, createdAt: previous?.createdAt || new Date().toISOString(), updatedAt: new Date().toISOString() };
+      const draft = { id: previous?.id || randomUUID(), sourceJobId: id, title: job.title, mode: job.input.mode, profileId: job.input.profile.id, profileSnapshot: job.result.profileSnapshot || job.input.profile, sceneType: job.input.sceneType, original: job.input.original, before: job.input.before, after: job.input.after, source: job.input.source, instructions: job.input.instructions, lockedFacts: job.input.lockedFacts, stopAt: job.input.stopAt, cutoffTitle: job.input.cutoffTitle, ...structuredClone(job.result), incomplete: job.status !== 'ready', model: job.model, endpoint: job.endpoint, calls: job.calls, audit: job.audit, promptSnapshot: job.input.prompts, createdAt: previous?.createdAt || new Date().toISOString(), updatedAt: new Date().toISOString() };
       if (previous) Object.assign(previous, draft); else project.studio.drafts.push(draft);
     }
     return project;

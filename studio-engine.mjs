@@ -3,10 +3,13 @@ import { AGENTS, PROMPT_VERSION, resolvedPrompts, parseStyleAnalysis, parseObjec
 import { characterTimeline } from './public/maintenance.js';
 import { sortChapters } from './public/domain.js';
 import { analysisSamples, SAMPLING_VERSION } from './public/style-sampling.js';
+import { selectProfileScenes } from './public/scene-domain.js';
+import { captureSceneAnalysis, indexesChanged, executeSceneIndex, executeSceneAnalysis } from './scene-engine.mjs';
 
 export const digest = text => createHash('sha256').update(text).digest('hex');
-export const profileStale = (profile, p) => (profile.sourceManifest || []).some(s => digest(p.studio.sources.find(x => x.id === s.id)?.body || '') !== s.hash);
+export const profileStale = (profile, p) => (profile.sourceManifest || []).some(s => digest(p.studio.sources.find(x => x.id === s.id)?.body || '') !== s.hash) || indexesChanged(profile, p);
 export function captureAnalysis(p, data) {
+  if (data.analysisMode === 'scenes') return captureSceneAnalysis(p, data);
   if (!Array.isArray(data.sourceIds) || !data.sourceIds.length) throw new Error('请选择参考文档');
   const sources = p.studio.sources.filter(s => data.sourceIds.includes(s.id));
   if (sources.length !== new Set(data.sourceIds).size || sources.length > 12) throw new Error('参考材料选择无效，一次最多 12 份');
@@ -18,7 +21,7 @@ export function captureAnalysis(p, data) {
 }
 export function captureWriting(p, data) {
   if (!['rewrite', 'continue'].includes(data.mode)) throw new Error('请选择改写或续写');
-  const profile = profileForGeneration(p.studio.profiles.find(x => x.id === data.profileId));
+  const profile = profileForGeneration(p.studio.profiles.find(x => x.id === data.profileId), data.sceneType || 'auto');
   if (data.referenceLevel != null && !['light', 'strong'].includes(data.referenceLevel)) throw new Error('请选择有效的文风参考程度');
   const length = Number(data.length || 600);
   if (!Number.isInteger(length) || length < 100 || length > 3000) throw new Error('目标篇幅须为 100—3000 字');
@@ -68,11 +71,11 @@ export function captureWriting(p, data) {
   // Hard cap keeps a long novel's context bounded; author-locked facts are always included separately.
   const bounded = []; let chars = 0;
   for (const entry of pool) { const size = JSON.stringify(entry).length; if (chars + size > 36000) break; bounded.push(entry); chars += size; }
-  return { type: 'writing', mode: data.mode, profile, original, before, after, source, cutoffTitle: cutoff?.title || '无作品资料', pool: bounded, characterNames: characters.map(c => c.name), instructions: (data.instructions || '').trim(), lockedFacts: (data.lockedFacts || '').trim(), stopAt: (data.stopAt || '').trim(), length, referenceLevel: data.referenceLevel || 'light', intensity: ['light', 'medium', 'strong'].includes(data.intensity) ? data.intensity : 'light', revise: data.revise !== false, promptVersion: PROMPT_VERSION, promptRevision: p.studio.promptRevision, prompts: resolvedPrompts(p) };
+  return { type: 'writing', mode: data.mode, sceneType: data.sceneType || 'auto', profile, original, before, after, source, cutoffTitle: cutoff?.title || '无作品资料', pool: bounded, characterNames: characters.map(c => c.name), instructions: (data.instructions || '').trim(), lockedFacts: (data.lockedFacts || '').trim(), stopAt: (data.stopAt || '').trim(), length, referenceLevel: data.referenceLevel || 'light', intensity: ['light', 'medium', 'strong'].includes(data.intensity) ? data.intensity : 'light', revise: data.revise !== false, promptVersion: PROMPT_VERSION, promptRevision: p.studio.promptRevision, prompts: resolvedPrompts(p) };
 }
 export function jobOutdated(job, p) {
   if (p.projectId !== job.projectId) return true;
-  if (job.input.type === 'analysis') return (job.input.sourceManifest || job.input.sources.map(s => ({ id: s.id, hash: digest(s.body) }))).some(s => digest(p.studio.sources.find(x => x.id === s.id)?.body || '') !== s.hash);
+  if (['analysis', 'scene-index'].includes(job.input.type)) return (job.input.sourceManifest || job.input.sources.map(s => ({ id: s.id, hash: digest(s.body) }))).some(s => digest(p.studio.sources.find(x => x.id === s.id)?.body || '') !== s.hash) || indexesChanged(job.input, p);
   return job.input.source.kind === 'chapter' && digest(p.chapters.find(c => c.id === job.input.source.chapterId)?.body || '') !== job.input.source.bodyHash;
 }
 export function styleCopyWarnings(text, input) {
@@ -87,13 +90,15 @@ export function styleCopyWarnings(text, input) {
 }
 const writingSchema = '只返回 {"text":"完整候选正文","notes":"简短说明","unresolved":["需作者决定的问题"]}。';
 const reviewSchema = '只返回 {"status":"pass|issues|uncertain","issues":[{"severity":"blocking|suggestion|uncertain","quote":"候选稿连续原文或空字符串","message":"问题","suggestion":"局部建议","referenceIds":["依据编号"]}],"notes":"简短说明"}。';
-export async function executeStudio(job, call, persist) {
+export async function executeStudio(job, call, persist, reuseStep = () => null) {
   const input = job.input;
-  const step = async (id, role, payload, parse) => {
+  const step = async (id, role, payload, parse, cacheKey) => {
     if (job.steps[id]?.status === 'done') return job.steps[id].result;
+    const cached = cacheKey && reuseStep(cacheKey);
+    if (cached) { const result = parse(JSON.stringify(cached.result)); job.steps[id] = { role, status: 'done', attempts: 0, result, reused: true, cacheKey }; await persist(); return result; }
     const saved = job.steps[id] || { attempts: 0 };
     if (saved.attempts >= 3) throw new Error('此步骤已尝试三次，请检查接口或提示词后新建任务');
-    job.steps[id] = { ...saved, role, status: 'running', attempts: saved.attempts + 1, startedAt: new Date().toISOString(), error: '' };
+    job.steps[id] = { ...saved, role, status: 'running', attempts: saved.attempts + 1, startedAt: new Date().toISOString(), error: '', ...(cacheKey ? { cacheKey } : {}) };
     job.currentStep = id; await persist();
     try {
       const result = await call(role, input.prompts[role], payload);
@@ -102,6 +107,8 @@ export async function executeStudio(job, call, persist) {
       await persist(); return parsed;
     } catch (error) { job.steps[id].status = 'failed'; job.steps[id].error = error.message; await persist(); throw error; }
   };
+  if (input.type === 'scene-index') return executeSceneIndex(job, step, persist);
+  if (input.analysisMode === 'scenes') return executeSceneAnalysis(job, step, persist);
   if (input.type === 'analysis') {
     job.result = await step('style', 'style', { task: '分析所选材料的文风；不同样本为不连续原文，分别核对出处。仅依据这些样本归纳，不声称已读完整本书。', sources: input.sources, sampling: input.sampling, schema: '{name,overview,uncertainty,rules:[{category:"syntax|perspective|description|dialogue|rhythm|rhetoric|other",rule,scope:"general|scene",scene,sourceId,quote}],examples:[{sourceId,quote,scene}]}' }, text => {
       const result = parseStyleAnalysis(text, input.sources);
@@ -113,24 +120,27 @@ export async function executeStudio(job, call, persist) {
     });
     return;
   }
-  const chosen = await step('context', 'context', { task: '为本次片段任务选择相关资料编号', mode: input.mode, instructions: input.instructions, lockedFacts: input.lockedFacts, original: input.original, before: input.before, cutoff: input.cutoffTitle, pool: input.pool, schema: '{"selectedIds":["池中编号"],"missing":["缺失信息"]}' }, text => {
+  const chosen = await step('context', 'context', { task: '为本次片段任务选择相关资料编号', mode: input.mode, instructions: input.instructions, lockedFacts: input.lockedFacts, original: input.original, before: input.before, cutoff: input.cutoffTitle, pool: input.pool, availableSceneTypes: input.sceneType === 'auto' ? input.profile.availableSceneTypes || [] : [], schema: '{"selectedIds":["池中编号"],"missing":["缺失信息"],"sceneTypes":["本次适用的场景编号，最多两个；只从 availableSceneTypes 选取"]}' }, text => {
     const r = parseObject(text);
     if (!Array.isArray(r.selectedIds) || r.selectedIds.some(id => !input.pool.some(x => x.id === id)) || !Array.isArray(r.missing) || r.missing.some(x => typeof x !== 'string')) throw new Error('资料 Agent 返回了无效资料编号或缺失说明');
-    return { selectedIds: [...new Set(r.selectedIds)], missing: r.missing.slice(0, 20).map(x => x.slice(0, 1000)) };
+    if (r.sceneTypes !== undefined && (!Array.isArray(r.sceneTypes) || r.sceneTypes.length > 2 || r.sceneTypes.some(t => !input.profile.availableSceneTypes?.includes(t)))) throw new Error('自动场景建议包含未知类型');
+    return { sceneTypes: input.sceneType === 'auto' ? [...new Set(r.sceneTypes || [])] : [], selectedIds: [...new Set(r.selectedIds)], missing: r.missing.slice(0, 20).map(x => x.slice(0, 1000)) };
   });
   const facts = input.pool.filter(x => chosen.selectedIds.includes(x.id) || x.id.startsWith('state:'));
-  const common = { mode: input.mode, instructions: input.instructions, lockedFacts: input.lockedFacts, stopAt: input.stopAt, targetLength: input.length, intensity: input.intensity, referenceLevel: input.referenceLevel || 'light', original: input.original, before: input.before, after: input.after, facts, missing: chosen.missing, profile: input.profile };
+  const activeProfile = input.sceneType === 'auto' && input.profile.availableSceneTypes?.length ? selectProfileScenes(input.profile, chosen.sceneTypes || []) : input.profile;
+  if (!activeProfile.rules.length) throw new Error('本次未找到适用的文风规则，请手动选择已有专项或补充通用习惯');
+  const common = { mode: input.mode, instructions: input.instructions, lockedFacts: input.lockedFacts, stopAt: input.stopAt, targetLength: input.length, intensity: input.intensity, referenceLevel: input.referenceLevel || 'light', original: input.original, before: input.before, after: input.after, facts, missing: chosen.missing, profile: activeProfile };
   const parseWriting = text => { const r = parseObject(text); if (typeof r.text !== 'string' || !r.text.trim() || r.text.length > 40000 || !Array.isArray(r.unresolved) || r.unresolved.some(x => typeof x !== 'string')) throw new Error('写作 Agent 返回格式无效或正文超过 4 万字符'); return { text: r.text, notes: String(r.notes || '').slice(0, 3000), unresolved: r.unresolved.slice(0, 20).map(x => x.slice(0, 1000)) }; };
   const initial = await step('write', 'writer', { ...common, schema: writingSchema }, parseWriting);
   const review = async (suffix, text) => {
     const results = await Promise.allSettled([
       step('continuity' + suffix, 'continuity', { task: '核对候选稿情节一致性', ...common, profile: undefined, candidate: text, schema: reviewSchema }, r => parseReview(r, text, facts.map(x => x.id))),
-      step('styleReview' + suffix, 'styleReview', { task: '核对候选稿文风', instructions: input.instructions, mode: input.mode, referenceLevel: input.referenceLevel || 'light', profile: input.profile, candidate: text, original: input.original, schema: reviewSchema }, r => parseReview(r, text, input.profile.rules.map(x => x.id)))
+      step('styleReview' + suffix, 'styleReview', { task: '核对候选稿文风', instructions: input.instructions, mode: input.mode, referenceLevel: input.referenceLevel || 'light', profile: activeProfile, candidate: text, original: input.original, schema: reviewSchema }, r => parseReview(r, text, activeProfile.rules.map(x => x.id)))
     ]);
     const failed = results.find(r => r.status === 'rejected'); if (failed) throw failed.reason;
     return { continuity: results[0].value, style: results[1].value };
   };
-  job.result = { versions: [{ label: '初稿', ...initial }], facts, missing: chosen.missing }; await persist();
+  job.result = { versions: [{ label: '初稿', ...initial }], facts, missing: chosen.missing, profileSnapshot: activeProfile }; await persist();
   const initialReviews = await review('', initial.text);
   job.result.versions[0].reviews = initialReviews; await persist();
   const issues = [...initialReviews.continuity.issues, ...initialReviews.style.issues];
