@@ -4,8 +4,12 @@ import { uid } from './domain.js';
 export function createSceneUI(ctx, local) {
   const { state, api, mutate, render, e, button, openModal, closeModal, modalError, toast } = ctx;
   const choices = { types: Object.keys(SCENE_TYPES), budget: 40000, names: new Map() };
-  const selected = ids => state.project.studio.sources.filter(s => (ids || [...local.selectedSources]).includes(s.id));
-  const controls = () => `<div class="scene-workflow"><h3>按写作场景深入分析</h3><p>先识别全文，再核对分类样本，最后形成通用习惯与专项写法。原文位置由程序保存，内容类型可多选。</p><div class="actions">${button('建立场景索引', 'studio-scene-index', 'book', true)}${button('分类样本与专项分析', 'studio-scene-preview', 'ai')}</div><small>${state.project.studio.sceneIndexes.filter(i => !local.indexMeta?.find(m => m.sourceId === i.sourceId)?.outdated).length} 份已保存索引 · 初次识别会分批发送全文，确认前显示总量与批次。</small></div>`;
+  const selected = ids => state.project.studio.sources.filter(s => (ids || (local.selectedSources.size ? [...local.selectedSources] : state.project.studio.sources.length === 1 ? [state.project.studio.sources[0].id] : [])).includes(s.id));
+  const controls = () => {
+    const sources = selected().length ? selected() : state.project.studio.sources.length === 1 ? state.project.studio.sources : [];
+    const ready = sources.length && sources.every(s => state.project.studio.sceneIndexes.some(i => i.sourceId === s.id) && !local.indexMeta?.find(m => m.sourceId === s.id)?.outdated);
+    return `<div class="scene-workflow"><h3>按写作场景深入分析</h3><p>先识别全文，再核对分类样本，最后形成通用习惯与专项写法。原文位置由程序保存，内容类型可多选。</p><div class="actions">${button(ready ? '重新建立索引（可选）' : '建立场景索引', 'studio-scene-index', 'book', !ready)}${button('分类样本与专项分析', 'studio-scene-preview', 'ai', Boolean(ready))}</div><small>${state.project.studio.sceneIndexes.filter(i => !local.indexMeta?.find(m => m.sourceId === i.sourceId)?.outdated).length} 份已保存索引 · 初次识别会分批发送全文，确认前显示总量与批次。</small></div>`;
+  };
   function summary(profile) {
     return profile.specialties ? `<div class="scene-specialties">${profile.specialties.map(s => `<span class="tag ${s.status === 'missing' ? 'gold' : ''}">${e(SCENE_TYPES[s.type])} · ${s.status === 'missing' ? '样本不足' : s.status === 'limited' ? '少量样本' : `${s.sampleCount} 段样本`}</span>`).join('')}</div>` : '';
   }
@@ -68,7 +72,7 @@ export function createSceneUI(ctx, local) {
   function showJob(job) {
     if (job.type !== 'scene-index') return false;
     const indexes = job.result?.indexes || [];
-    const dialog = openModal(job.title, `${indexes.length ? indexes.map(i => `<h3>${e(i.sourceName)}</h3><p>${i.paragraphs.length} 段 · ${i.recognizedChapters} 个章节标题 · 排除 ${i.paragraphs.filter(p => p.excluded).length} 段非正文</p>`).join('') : '<p>识别完成后可保存索引，再预览各类写作样本。</p>'}${job.error ? `<p class="error-message">${e(job.error)}</p>` : ''}<p class="hint">已发出 ${job.calls} 次请求。相同批次与已完成步骤会复用，不自动重复计费。</p>`, `${job.status === 'ready' && !job.outdated ? '<button class="btn primary" id="scene-index-collect">保存索引并查看分类样本</button>' : ''}<button class="btn" data-action="close-modal">关闭</button>`, true);
+    const dialog = openModal(job.title, `${indexes.length ? indexes.map(i => `<h3>${e(i.sourceName)}</h3><p>${i.paragraphs.length} 段 · ${i.recognizedChapters} 个章节标题 · 排除 ${i.paragraphs.filter(p => p.excluded).length} 段非正文</p>`).join('') : '<p>识别完成后可保存索引，再预览各类写作样本。</p>'}${job.error ? `<p class="error-message">${e(job.error)}</p>` : ''}<p class="hint">已发出 ${job.calls} 次请求。相同批次与已完成步骤会复用，不自动重复计费。</p>`, `${job.status === 'ready' && !job.outdated ? '<button class="btn primary" id="scene-index-collect">保存索引并查看分类样本</button>' : ''}${['failed', 'paused'].includes(job.status) && !job.outdated ? button(job.status === 'paused' ? '恢复任务' : '继续未完成步骤', 'studio-retry', 'clock', false, job.id) : ''}<button class="btn" data-action="close-modal">关闭</button>`, true);
     const save = dialog.querySelector('#scene-index-collect');
     if (save) save.onclick = async () => {
       save.disabled = true;

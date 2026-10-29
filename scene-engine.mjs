@@ -53,11 +53,14 @@ function focused(source, quote) {
   for (let at = source.body.indexOf(quote); at >= 0; at = source.body.indexOf(quote, at + 1)) if (Math.min(at + quote.length, source.focusEnd) - Math.max(at, source.focusStart) >= Math.min(8, quote.length)) return true;
   return false;
 }
-function parseSpecialty(text, samples, type) {
+export function parseSpecialty(text, samples, type) {
   const raw = parseObject(text);
   if (type === 'general' && Array.isArray(raw.rules) && raw.rules.length === 0 && Array.isArray(raw.examples) && raw.examples.length === 0 && typeof raw.overview === 'string' && typeof raw.uncertainty === 'string') return { overview: raw.overview.slice(0, 10000), uncertainty: raw.uncertainty.slice(0, 4000), rules: [], examples: [] };
   const result = parseStyleAnalysis(raw, samples);
-  for (const item of [...result.rules, ...result.examples]) if (!focused(samples.find(s => s.id === item.sourceId), item.quote)) throw new Error('专项证据须包含标记的场景段落，不能只引用相邻上下文');
+  for (const [i, item] of [...result.rules, ...result.examples].entries()) if (!focused(samples.find(s => s.id === item.sourceId), item.quote)) {
+    const path = i < result.rules.length ? `规则 ${i + 1}` : `样例 ${i - result.rules.length + 1}`;
+    throw Object.assign(new Error(`${path}：专项证据须包含标记的场景段落，不能只引用相邻上下文`), { diagnostic: { path, sourceId: item.sourceId, quote: item.quote, reason: '引用只在上下文中，没有覆盖该场景的核心原文' } });
+  }
   const limit = type === 'general' ? 6 : 4;
   if (result.rules.length > limit || result.examples.length > (type === 'general' ? 2 : 1)) throw new Error(`本专项最多 ${limit} 条规则、${type === 'general' ? 2 : 1} 个样例，请缩减输出`);
   if (type === 'general') for (let i = 0; i < raw.rules.length; i++) {
@@ -76,7 +79,7 @@ export async function executeSceneAnalysis(job, step, persist) {
   const input = job.input, results = [], specialties = [];
   for (const group of input.groups) {
     if (!group.samples.length) { specialties.push({ type: group.type, status: 'missing', candidateCount: 0, sampleCount: 0, overview: '没有该类可用样本', ruleIds: [] }); continue; }
-    const result = await step('specialty-' + group.type, 'style', { task: `只分析“${group.label}”的表达方法：动作与停顿、信息安排、句法、视角、修辞等；最多 4 条规则和 1 个样例。不要将这类写法概括为全书通用习惯。sourceId 使用 sources[].id，证据须包含 focus 场景段落，body 的其余文字只供理解上下文。忽略声明、目录、广告。`, sources: group.samples, sampleStatus: group.status, schema: styleSchema }, text => parseSpecialty(text, group.samples, group.type));
+    const result = await step('specialty-' + group.type, 'style', { task: `只分析“${group.label}”的表达方法：动作与停顿、信息安排、句法、视角、修辞等；最多 4 条规则和 1 个样例。不要将这类写法概括为全书通用习惯。sourceId 逐字复制 sources[].id；quote 逐字复制该 source.body 中的连续文字，保留标点、空格、换行，不拼接或添加省略号。证据须包含 focus 场景段落，body 的其余文字只供理解上下文。忽略声明、目录、广告。`, sources: group.samples, sampleStatus: group.status, schema: styleSchema }, text => parseSpecialty(text, group.samples, group.type));
     results.push(result); specialties.push({ type: group.type, status: group.status, candidateCount: group.candidateCount, sampleCount: group.samples.length, overview: result.overview, uncertainty: result.uncertainty, ruleIds: result.rules.map(r => r.id) });
   }
   let general = { overview: '专项分析已完成；通用习惯需要跨类型材料支持。', rules: [], examples: [], uncertainty: '只有一类可用样本，未归纳跨场景通用规律。' };

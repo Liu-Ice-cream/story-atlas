@@ -2,6 +2,8 @@ import { uid, now, sortChapters } from './domain.js';
 import { AGENTS, PROMPT_VERSION, ruleCategories, sentenceDiff } from './studio-domain.js';
 import { writingSelection } from './chapter-text.js';
 import { createSceneUI } from './scene-ui.js';
+import { styleWorkflow } from './studio-workflow.js';
+import { jobLabels, renderStudioJobs, analysisRepairModal } from './studio-jobs-ui.js';
 import { SCENE_TYPES } from './scene-domain.js';
 import { analysisSamples, SOURCE_MAX_CHARS, DEFAULT_SAMPLE_CHARS, SAMPLING_VERSION } from './style-sampling.js';
 
@@ -9,8 +11,6 @@ export function createStudioUI(ctx) {
   const { state, api, mutate, render, navigate, e, tag, button, openModal, closeModal, modalError, toast, chooseFiles, decodeFile, download } = ctx;
   const local = { tab: 'sources', jobs: [], configured: false, profileMeta: [], error: '', form: { mode: 'rewrite', sourceKind: 'chapter', profileId: '', chapterId: '', text: '', instructions: '', lockedFacts: '', stopAt: '', length: 600, intensity: 'light', referenceLevel: 'light', sceneType: 'auto', revise: true, characterIds: [], cutoffId: '' }, chapter: null, selection: null, selectedSources: new Set(), submitting: false, dirty: false, currentCandidate: null };
   const sceneUI = createSceneUI({ ...ctx, refresh }, local);
-  const jobLabels = { queued: '排队中', running: '正在处理', ready: '结果待过目', failed: '未完成', cancelled: '已停止', outdated: '原文已更新' };
-  const stepLabels = { style: '分析文风', context: '整理前情', write: '生成初稿', continuity: '情节核对', styleReview: '文风核对', revise: '按意见修订', continuity2: '修订后情节核对', styleReview2: '修订后文风核对' };
   const date = value => new Date(value).toLocaleString('zh-CN', { hour12: false });
   const $ = selector => document.querySelector(selector);
   const profile = id => state.project.studio.profiles.find(x => x.id === id);
@@ -25,8 +25,10 @@ export function createStudioUI(ctx) {
   function profileList() {
     return state.project.studio.profiles.length ? state.project.studio.profiles.map(p => `<article class="studio-profile"><div class="studio-profile-top"><h3>${e(p.name)}</h3>${tag(p.approved ? '已确认' : '待确认', p.approved ? 'green' : 'gold')}${local.profileMeta.find(x => x.id === p.id)?.outdated ? tag('参考材料已变化', 'gold') : ''}</div><p>${e(p.overview.slice(0, 220))}</p>${sceneUI.summary(p)}${p.usage ? `<p class="studio-usage">适合：${e(p.usage)}</p>` : ''}${p.sampling ? `<small>${p.specialties ? '专项样本合计 ' + p.sampling.sampleLength.toLocaleString() + ' 字符（类型间可能重复） · 全文 ' + p.sampling.fullLength.toLocaleString() + ' 字符' : '基于 ' + p.sampling.sampleLength.toLocaleString() + ' / ' + p.sampling.fullLength.toLocaleString() + ' 字符的样本'}</small>` : ''}<small>版本 ${p.version} · ${p.rules.filter(r => r.weight !== 'off').length} 条启用规则 · ${p.examples.filter(x => x.enabled !== false).length} 个样例</small><div class="actions">${button('查看与编辑', 'studio-profile', 'edit', false, p.id)}${p.approved ? button('用于片段写作', 'studio-use-profile', 'arrow', true, p.id) : ''}${button('移除', 'studio-delete-profile', 'trash', false, p.id)}</div></article>`).join('') : '<p class="hint">分析参考材料后，将结果保存为草案；确认规则和样例后即可使用。</p>';
   }
-  function renderJobs() {
-    return `${local.error ? `<p class="error-message">${e(local.error)}</p>` : ''}${local.jobs.length ? local.jobs.map(j => `<div class="studio-job"><div><strong>${e(j.title)}</strong><p>${e(j.outdated ? '原文或材料已变化' : jobLabels[j.status])} · ${j.calls} 次请求${j.totalBatches ? ` · ${j.status === 'ready' ? j.totalBatches : Object.values(j.steps).filter(s => s.status === 'done').length} / ${j.totalBatches} 批${j.calls === 0 && j.status === 'ready' ? '（复用已有索引）' : ''}` : ''}${j.collected ? ' · 已保存到档案' : ''}</p>${j.error ? `<p class="job-error">${e(j.error)}</p>` : ''}<div class="studio-step-list">${Object.entries(j.steps).map(([id, s]) => `<span class="step-${e(s.status)}">${e(stepLabels[id] || (id.startsWith('index-') ? '场景识别批次' : id.startsWith('specialty-') ? SCENE_TYPES[id.slice(10)] : id === 'scene-general' ? '通用习惯归纳' : id))} ${s.status === 'done' ? '✓' : s.status === 'failed' ? '待继续' : '…'}</span>`).join('')}</div></div><div class="job-actions">${button('查看', 'studio-job', 'arrow', false, j.id)}${j.status === 'failed' && !j.outdated ? button('继续未完成步骤', 'studio-retry', 'clock', false, j.id) : ''}${['queued', 'running'].includes(j.status) ? button('停止', 'studio-cancel', 'close', false, j.id) : ''}</div></div>`).join('') : '<p class="hint">分析或写作任务会保存在本机。关闭页面后，本机服务仍可继续处理。</p>'}`;
+  function renderJobs() { return renderStudioJobs(local, e, button); }
+  function workflowPanel() {
+    const next = styleWorkflow(state.project, local);
+    return `<section class="studio-workflow-guide" aria-label="文风准备进度"><ol>${['导入材料', '保存场景索引', '分析专项', '确认文风', '仿写与续写'].map((label, i) => `<li class="${next.stage > i + 1 ? 'done' : next.stage === i + 1 ? 'current' : ''}">${i + 1} · ${label}</li>`).join('')}</ol><p>${e(next.message)}</p>${next.label ? button(next.label, 'studio-workflow-next', 'arrow', true) : ''}</section>`;
   }
   function writingForm() {
     const f = local.form, profiles = state.project.studio.profiles.filter(p => p.approved), chapters = sortChapters(state.project.chapters);
@@ -54,13 +56,14 @@ export function createStudioUI(ctx) {
     return `<p class="hint">每个角色独立调用同一模型，工具权限限于读取本次资料和返回结果。修改提示词会产生新版本；已开始的任务保留当时的提示词。内置版本 ${PROMPT_VERSION}，自定义版本 ${state.project.studio.promptRevision}。</p>${Object.entries(AGENTS).map(([id, agent]) => `<details class="studio-agent"><summary>${e(agent.name)} <small>${e(agent.responsibility)}</small></summary><textarea data-studio-prompt="${id}" aria-label="${e(agent.name)}提示词" maxlength="12000">${e(state.project.studio.promptOverrides[id] || agent.prompt)}</textarea><div class="actions">${button('保存提示词', 'studio-prompt-save', 'check', false, id)}${button('恢复内置提示词', 'studio-prompt-reset', 'back', false, id)}</div></details>`).join('')}`;
   }
   function renderPage() {
-    return `<div class="page-heading"><div><div class="eyebrow">摹其笔意，写自己的故事</div><h1>文风工作台</h1><p>从参考文字中整理写法，在你指定的片段里尝试。</p></div><div class="heading-actions">${tag(local.configured ? '接口会话已配置' : '接口尚未配置', local.configured ? 'green' : 'gold')}<button class="btn" data-page="ai">接口设置</button></div></div><div class="studio-tabs">${[['sources', '参考与文风'], ['writing', '片段写作'], ['drafts', '候选稿'], ['prompts', 'Agent 职责与提示词']].map(([id, title]) => `<button class="${local.tab === id ? 'active' : ''}" data-action="studio-tab" data-id="${id}">${title}</button>`).join('')}</div>${local.tab === 'sources' ? `<div class="studio-columns"><section class="panel form-panel"><div class="detail-title"><h2>参考材料</h2><div class="actions">${button('导入文档', 'studio-import', 'upload')}${button('粘贴文字', 'studio-paste', 'plus')}</div></div><p class="hint">支持整本导入，每份最多 200 万字符。深度分析先建立全文场景索引，再核对分类样本；也可使用一次请求的位置抽样快捷分析。不同文风请分别分析并保存。</p>${sourceList()}${sceneUI.controls()}<div class="studio-analyze">${button('位置抽样分析（快捷）', 'studio-analyze', 'ai', true)}<small>一次分析请求，结果需你编辑确认。</small></div></section><section class="panel form-panel"><h2>我的文风库</h2><p class="hint">每份档案可命名、备注适用场景。不同片段切换使用，一次任务采用一份文风。</p>${profileList()}</section></div>` : local.tab === 'writing' ? `<div class="studio-compose"><section class="panel form-panel"><h2>片段与要求</h2>${writingForm()}</section><aside class="studio-writing-note"><h3>你掌握情节走向</h3><p>文风负责表达。不可改变的事实、角色知情范围与停止位置，应在本次要求中写清楚。</p><ol><li>准备相关前情</li><li>生成候选稿</li><li>分别核对情节与文风</li><li>按设置修订，再交给你选择</li></ol><p>候选稿可复制或导出。采用到原始正文文件后，再通过章节目录同步更新资料。</p></aside></div>` : local.tab === 'drafts' ? draftList() : `<section class="panel form-panel">${promptPanel()}</section>`}<section class="section studio-jobs"><div class="section-head"><h2>本机任务记录</h2>${button('刷新进度', 'studio-refresh', 'clock')}</div><div class="panel" id="studio-job-list">${renderJobs()}</div></section>`;
+    return `<div class="page-heading"><div><div class="eyebrow">摹其笔意，写自己的故事</div><h1>文风工作台</h1><p>从参考文字中整理写法，在你指定的片段里尝试。</p></div><div class="heading-actions">${tag(local.configured ? '接口会话已配置' : '接口尚未配置', local.configured ? 'green' : 'gold')}<button class="btn" data-page="ai">接口设置</button></div></div><div class="studio-tabs">${[['sources', '参考与文风'], ['writing', '片段写作'], ['drafts', '候选稿'], ['prompts', 'Agent 职责与提示词']].map(([id, title]) => `<button class="${local.tab === id ? 'active' : ''}" data-action="studio-tab" data-id="${id}">${title}</button>`).join('')}</div><div id="studio-workflow-guide">${workflowPanel()}</div>${local.tab === 'sources' ? `<div class="studio-columns"><section class="panel form-panel"><div class="detail-title"><h2>参考材料</h2><div class="actions">${button('导入文档', 'studio-import', 'upload')}${button('粘贴文字', 'studio-paste', 'plus')}</div></div><p class="hint">支持整本导入，每份最多 200 万字符。深度分析先建立全文场景索引，再核对分类样本；也可使用一次请求的位置抽样快捷分析。不同文风请分别分析并保存。</p>${sourceList()}${sceneUI.controls()}<div class="studio-analyze">${button('位置抽样分析（快捷）', 'studio-analyze', 'ai', true)}<small>一次分析请求，结果需你编辑确认。</small></div></section><section class="panel form-panel"><h2>我的文风库</h2><p class="hint">每份档案可命名、备注适用场景。不同片段切换使用，一次任务采用一份文风。</p>${profileList()}</section></div>` : local.tab === 'writing' ? `<div class="studio-compose"><section class="panel form-panel"><h2>片段与要求</h2>${writingForm()}</section><aside class="studio-writing-note"><h3>你掌握情节走向</h3><p>文风负责表达。不可改变的事实、角色知情范围与停止位置，应在本次要求中写清楚。</p><ol><li>准备相关前情</li><li>生成候选稿</li><li>分别核对情节与文风</li><li>按设置修订，再交给你选择</li></ol><p>候选稿可复制或导出。采用到原始正文文件后，再通过章节目录同步更新资料。</p></aside></div>` : local.tab === 'drafts' ? draftList() : `<section class="panel form-panel">${promptPanel()}</section>`}<section class="section studio-jobs"><div class="section-head"><h2>本机任务记录</h2>${button('刷新进度', 'studio-refresh', 'clock')}</div><div class="panel" id="studio-job-list">${renderJobs()}</div></section>`;
   }
   async function refresh() {
     const projectId = state.project.projectId;
     const result = await api('/api/studio'); if (state.project.projectId !== projectId) return;
     local.jobs = result.jobs; local.configured = result.configured; local.profileMeta = result.profiles; local.indexMeta = result.sceneIndexes || []; local.error = result.error;
-    const node = $('#studio-job-list'); if (node) node.innerHTML = renderJobs();
+    const node = $('#studio-job-list'); if (node) { const expanded = [...node.querySelectorAll('details[open]')].map(d => d.dataset.jobDetails); node.innerHTML = renderJobs(); for (const d of node.querySelectorAll('details')) d.open = expanded.includes(d.dataset.jobDetails); }
+    const guide = $('#studio-workflow-guide'); if (guide) guide.innerHTML = workflowPanel();
   }
   async function serverMutation(operation) {
     const task = state.saveQueue.then(operation); state.saveQueue = task.catch(error => toast(error.message, true)); return task;
@@ -142,8 +145,8 @@ export function createStudioUI(ctx) {
     if (sceneUI.showJob(job)) return;
     if (job.type === 'analysis') {
       const result = job.result;
-      openModal(job.title, `${result ? `<h3>${e(result.name)}</h3><p>${e(result.overview)}</p>${result.rules.map(r => `<div class="studio-rule">${r.sceneType ? tag(SCENE_TYPES[r.sceneType] || '通用习惯') : ''}<p>${e(r.rule)}</p><blockquote>${e(r.quote)}</blockquote>${renderRuleEvidence(r)}<small>${e(r.sourceName)}</small></div>`).join('')}` : '<p>尚无分析结果。</p>'}${job.error ? `<p class="error-message">${e(job.error)}</p>` : ''}<p class="hint">${job.calls} 次请求 · ${e(job.model)} · 保存为草案后可逐条编辑确认。</p>`, `${result && !job.outdated && !['queued', 'running'].includes(job.status) ? button('保存为文风草案', 'studio-collect', 'check', true, id) : ''}<button class="btn" data-action="close-modal">关闭</button>`, true);
-    } else if (job.result?.versions?.length) candidateModal({ ...job.result, title: job.title, original: job.input.original, before: job.input.before, profileSnapshot: job.result.profileSnapshot || job.input.profile, source: job.input.source, mode: job.mode, instructions: job.input.instructions, lockedFacts: job.input.lockedFacts, cutoffTitle: job.input.cutoffTitle, incomplete: job.status !== 'ready', model: job.model, audit: job.audit, promptSnapshot: job.input.prompts, calls: job.calls }, ['queued', 'running'].includes(job.status) || job.outdated ? '' : id, undefined, 'parallel', job.outdated);
+      openModal(job.title, `${result ? `<h3>${e(result.name)}</h3><p>${e(result.overview)}</p>${result.rules.map(r => `<div class="studio-rule">${r.sceneType ? tag(SCENE_TYPES[r.sceneType] || '通用习惯') : ''}<p>${e(r.rule)}</p><blockquote>${e(r.quote)}</blockquote>${renderRuleEvidence(r)}<small>${e(r.sourceName)}</small></div>`).join('')}` : '<p>尚无分析结果。</p>'}${job.error ? `<p class="error-message">${e(job.error)}</p>` : ''}<p class="hint">${job.calls} 次请求 · ${e(job.model)} · 保存为草案后可逐条编辑确认。</p>`, `${job.repairs?.length && !job.outdated ? button('对照样本修复引用', 'studio-repair', 'edit', true, id) : ''}${['failed', 'paused'].includes(job.status) && !job.outdated ? button(job.status === 'paused' ? '恢复任务' : '继续未完成步骤（调用 AI）', 'studio-retry', 'clock', false, id) : ''}${result && !job.outdated && !['queued', 'running', 'pausing'].includes(job.status) ? button('保存为文风草案', 'studio-collect', 'check', true, id) : ''}<button class="btn" data-action="close-modal">关闭</button>`, true);
+    } else if (job.result?.versions?.length) candidateModal({ ...job.result, title: job.title, original: job.input.original, before: job.input.before, profileSnapshot: job.result.profileSnapshot || job.input.profile, source: job.input.source, mode: job.mode, instructions: job.input.instructions, lockedFacts: job.input.lockedFacts, cutoffTitle: job.input.cutoffTitle, incomplete: job.status !== 'ready', model: job.model, audit: job.audit, promptSnapshot: job.input.prompts, calls: job.calls }, ['queued', 'running', 'pausing'].includes(job.status) || job.outdated ? '' : id, undefined, 'parallel', job.outdated);
     else openModal(job.title, `<p>${e(jobLabels[job.status])}</p>${job.error ? `<p class="error-message">${e(job.error)}</p>` : ''}<p class="hint">完成的步骤会保留在本机。当前已发出 ${job.calls} 次请求。</p>`, '<button class="btn" data-action="close-modal">关闭</button>');
   }
   async function collect(id) {
@@ -166,7 +169,7 @@ export function createStudioUI(ctx) {
     } catch (error) { toast(error.message, true); } finally { local.submitting = false; if (event.submitter.isConnected) event.submitter.disabled = false; }
   }
   function bind() {
-    for (const checkbox of document.querySelectorAll('[data-studio-source]')) checkbox.onchange = () => { if (checkbox.checked) local.selectedSources.add(checkbox.dataset.studioSource); else local.selectedSources.delete(checkbox.dataset.studioSource); };
+    for (const checkbox of document.querySelectorAll('[data-studio-source]')) checkbox.onchange = () => { if (checkbox.checked) local.selectedSources.add(checkbox.dataset.studioSource); else local.selectedSources.delete(checkbox.dataset.studioSource); const guide = $('#studio-workflow-guide'); if (guide) guide.innerHTML = workflowPanel(); };
     const form = $('#studio-writing-form');
     if (form) {
       form.onsubmit = submitWriting;
@@ -180,6 +183,15 @@ export function createStudioUI(ctx) {
   }
   async function handleAction(act, id) {
     if (!act.startsWith('studio-')) return false;
+    if (act === 'studio-workflow-next') {
+      const next = styleWorkflow(state.project, local); next.sourceIds.forEach(id => local.selectedSources.add(id));
+      return next.action ? handleAction(next.action, next.id) : true;
+    }
+    if (act === 'studio-repair') {
+      const job = await api('/api/studio/jobs/' + id), repair = job.repairs?.[0];
+      if (!repair) throw new Error('此任务没有可修复的失败分析步骤');
+      analysisRepairModal(ctx, job, repair, async () => { closeModal(); await refresh(); render(); await showJob(id); toast('修复已在本机通过校验，恢复任务后继续'); }); return true;
+    }
     if (await sceneUI.handleAction(act)) return true;
     if (act === 'studio-open-chapter') await openForChapter(id);
     if (act === 'studio-tab') { captureForm(); local.tab = id; render(); }
@@ -205,7 +217,7 @@ export function createStudioUI(ctx) {
     }
     if (act === 'studio-job') await showJob(id);
     if (act === 'studio-collect') await collect(id);
-    if (act === 'studio-retry' || act === 'studio-cancel') { await api('/api/studio/jobs/' + id + (act === 'studio-retry' ? '/retry' : '/cancel'), { method: 'POST', body: '{}' }); await refresh(); toast(act === 'studio-retry' ? '将从未完成步骤继续，可能产生接口费用' : '已停止任务，已有结果保留'); }
+    if (['studio-retry', 'studio-cancel', 'studio-pause'].includes(act)) { await api('/api/studio/jobs/' + id + (act === 'studio-retry' ? '/retry' : act === 'studio-pause' ? '/pause' : '/cancel'), { method: 'POST', body: '{}' }); await refresh(); closeModal(); toast(act === 'studio-retry' ? '将从未完成步骤继续，可能产生接口费用' : act === 'studio-pause' ? '当前请求完成并保存后暂停；排队任务立即暂停' : '已停止任务，已有结果保留'); }
     if (act === 'studio-draft') {
       const draft = state.project.studio.drafts.find(d => d.id === id); if (!draft) throw new Error('候选稿不存在');
       let outdated = false;

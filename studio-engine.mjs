@@ -4,7 +4,7 @@ import { characterTimeline } from './public/maintenance.js';
 import { sortChapters } from './public/domain.js';
 import { analysisSamples, SAMPLING_VERSION } from './public/style-sampling.js';
 import { selectProfileScenes } from './public/scene-domain.js';
-import { captureSceneAnalysis, indexesChanged, executeSceneIndex, executeSceneAnalysis } from './scene-engine.mjs';
+import { captureSceneAnalysis, indexesChanged, executeSceneIndex, executeSceneAnalysis, parseSpecialty } from './scene-engine.mjs';
 
 export const digest = text => createHash('sha256').update(text).digest('hex');
 export const profileStale = (profile, p) => (profile.sourceManifest || []).some(s => digest(p.studio.sources.find(x => x.id === s.id)?.body || '') !== s.hash) || indexesChanged(profile, p);
@@ -90,10 +90,27 @@ export function styleCopyWarnings(text, input) {
 }
 const writingSchema = '只返回 {"text":"完整候选正文","notes":"简短说明","unresolved":["需作者决定的问题"]}。';
 const reviewSchema = '只返回 {"status":"pass|issues|uncertain","issues":[{"severity":"blocking|suggestion|uncertain","quote":"候选稿连续原文或空字符串","message":"问题","suggestion":"局部建议","referenceIds":["依据编号"]}],"notes":"简短说明"}。';
-export async function executeStudio(job, call, persist, reuseStep = () => null) {
+export function analysisStepSources(job, id) {
+  if (job.input.type !== 'analysis') throw new Error('仅文风分析支持本地修复');
+  if (job.input.analysisMode !== 'scenes' && id === 'style') return job.input.sources;
+  if (id === 'scene-general') return job.input.sources;
+  const group = job.input.groups?.find(g => id === 'specialty-' + g.type);
+  if (!group?.samples.length) throw new Error('分析步骤不存在或没有可用样本');
+  return group.samples;
+}
+export function parseAnalysisStep(job, id, text) {
+  const sources = analysisStepSources(job, id), input = job.input;
+  if (input.analysisMode === 'scenes') return parseSpecialty(text, sources, id === 'scene-general' ? 'general' : id.slice(10));
+  const result = parseStyleAnalysis(text, sources);
+  if (input.profileName) result.name = input.profileName;
+  for (const item of [...result.rules, ...result.examples]) { const source = sources.find(s => s.id === item.sourceId); item.sampleStart = source.start; item.sampleEnd = source.end; item.sourceId = source.originalSourceId || source.id; }
+  return result;
+}
+export async function executeStudio(job, call, persist, reuseStep = () => null, checkpoint = async () => {}) {
   const input = job.input;
   const step = async (id, role, payload, parse, cacheKey) => {
     if (job.steps[id]?.status === 'done') return job.steps[id].result;
+    await checkpoint('before', id);
     const cached = cacheKey && reuseStep(cacheKey);
     if (cached) { const result = parse(JSON.stringify(cached.result)); job.steps[id] = { role, status: 'done', attempts: 0, result, reused: true, cacheKey }; await persist(); return result; }
     const saved = job.steps[id] || { attempts: 0 };
@@ -102,21 +119,25 @@ export async function executeStudio(job, call, persist, reuseStep = () => null) 
     job.currentStep = id; await persist();
     try {
       const result = await call(role, input.prompts[role], payload);
+      // Keep the rejected analysis reply for local repair, including usage on validation failure.
+      if (input.type === 'analysis') job.steps[id].responseText = result.content;
+      job.steps[id].usage = result.usage;
       const parsed = parse(result.content);
       job.steps[id] = { ...job.steps[id], status: 'done', result: parsed, usage: result.usage, completedAt: new Date().toISOString() };
-      await persist(); return parsed;
-    } catch (error) { job.steps[id].status = 'failed'; job.steps[id].error = error.message; await persist(); throw error; }
+      delete job.steps[id].responseText; delete job.steps[id].diagnostic;
+      await persist(); await checkpoint('after', id); return parsed;
+    } catch (error) {
+      if (['JOB_PAUSED', 'JOB_YIELD'].includes(error.code)) throw error;
+      job.steps[id].status = 'failed'; job.steps[id].error = error.message;
+      if (error.diagnostic) job.steps[id].diagnostic = error.diagnostic;
+      await persist(); throw error;
+    }
   };
   if (input.type === 'scene-index') return executeSceneIndex(job, step, persist);
   if (input.analysisMode === 'scenes') return executeSceneAnalysis(job, step, persist);
   if (input.type === 'analysis') {
     job.result = await step('style', 'style', { task: '分析所选材料的文风；不同样本为不连续原文，分别核对出处。仅依据这些样本归纳，不声称已读完整本书。', sources: input.sources, sampling: input.sampling, schema: '{name,overview,uncertainty,rules:[{category:"syntax|perspective|description|dialogue|rhythm|rhetoric|other",rule,scope:"general|scene",scene,sourceId,quote}],examples:[{sourceId,quote,scene}]}' }, text => {
-      const result = parseStyleAnalysis(text, input.sources);
-      if (input.profileName) result.name = input.profileName;
-      // Keep original document IDs for the editable library; verify against the
-      // actual samples first, so quotes from unsent parts cannot be accepted.
-      for (const item of [...result.rules, ...result.examples]) { const source = input.sources.find(s => s.id === item.sourceId); item.sampleStart = source.start; item.sampleEnd = source.end; item.sourceId = source.originalSourceId || source.id; }
-      return result;
+      return parseAnalysisStep(job, 'style', text);
     });
     return;
   }
