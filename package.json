@@ -9,7 +9,9 @@
     "start": "node server.mjs",
     "test": "node --test tests/*.test.mjs",
     "check:public": "node tools/check-public.mjs",
-    "check": "node --check server.mjs && node --check public/app.js && node --check public/domain.js && node --check public/features.js && node --check public/maintenance.js && node --check public/studio-domain.js && node --check public/studio-ui.js && node --check public/reader-domain.js && node --check public/reader-ui.js && node --check public/chapter-text.js && node --check studio-engine.mjs && node --check studio-queue.mjs && node --check snapshots.mjs && node --check source-directory.mjs && node --check ai-queue.mjs && node --check ai-provider.mjs && node --check public/style-sampling.js && node --check public/scene-domain.js && node --check public/scene-ui.js && node --check scene-engine.mjs && node --check public/studio-workflow.js && node --check public/studio-jobs-ui.js && node --check public/themes.js && node --check public/theme-bootstrap.js"
+    "prepare:public": "node tools/prepare-public.mjs",
+    "gate:public": "node tools/publication-gate.mjs",
+    "check": "node --check server.mjs && node --check public/app.js && node --check public/domain.js && node --check public/features.js && node --check public/maintenance.js && node --check public/studio-domain.js && node --check public/studio-ui.js && node --check public/reader-domain.js && node --check public/reader-ui.js && node --check public/chapter-text.js && node --check studio-engine.mjs && node --check studio-queue.mjs && node --check snapshots.mjs && node --check source-directory.mjs && node --check ai-queue.mjs && node --check ai-provider.mjs && node --check public/style-sampling.js && node --check public/scene-domain.js && node --check public/scene-ui.js && node --check scene-engine.mjs && node --check public/studio-workflow.js && node --check public/studio-jobs-ui.js && node --check public/themes.js && node --check public/theme-bootstrap.js && node --check tools/publication-policy.mjs && node --check tools/prepare-public.mjs && node --check tools/publication-gate.mjs"
   },
   "engines": {
     "node": ">=22"

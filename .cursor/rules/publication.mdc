@@ -1,0 +1,11 @@
+---
+description: Always preserve the separate clean public checkout for Story Atlas
+alwaysApply: true
+---
+
+Read AGENTS.md and PUBLICATION.md before syncing or publishing.
+Never push the daily development/data checkout or transfer its Git history.
+Export committed, individually allowlisted source with `npm run prepare:public`.
+Review and commit the exported diff in the separately configured public checkout.
+Use its publication gate and pre-push hook; never bypass either hook or secret scanning.
+Keep manuscripts, references, screenshots, backups, and credentials outside that checkout.

@@ -8,7 +8,28 @@
 
 应用是本机单人工具，服务绑定环回地址。公开源码不会将本机服务或小说资料部署到网络。配置 AI 后，明确触发的分析或已启用的自动整理会向所选服务商发送对应材料，具体范围见 README。
 
-## 同步前检查
+## 开发与发布分离（2026-10-30 起）
+
+日常开发与使用在 `story-atlas` 目录进行，小说及参考材料留在这里。独立的 `story-atlas-public` 目录只用于发布；不要在其中启动应用、导入材料或保存截图。两个目录使用独立 Git 仓库，开发仓库不再配置 GitHub 远程，并由本机 pre-push hook 拒绝推送，包括显式指定远程 URL 的推送。
+
+`publication-files.json` 是逐文件白名单，不使用目录通配。新增源码需要单独审核并加入白名单。发布工具仅从开发仓库当前已提交版本读取清单内的文件；不复制开发目录、不合并开发分支、不传输其 Git 历史。未提交修改和白名单外文件不会导出。
+
+本机配对路径、角色、私有标识和 Gitleaks 路径保存在各仓库 Git 元数据的 `story-atlas-publication.json`，不进入源码提交。导出工具要求目标仓库角色为 public、配对关系正确、地址正确且两边工作区均干净，发现发布目录中的未跟踪文件、运行数据或符号链接则停止。复制前检查候选内容与固定插画哈希并运行密钥扫描；复制后再次检查暂存区和公开历史。失败时不提交、不推送；在重新导出前先检查并处理发布目录中的修改。
+
+### 日常发布
+
+1. 在开发目录完成修改、检查及本地提交。人工审查白名单变更，禁止强制添加私有材料。
+2. 在开发目录执行 `npm run prepare:public`，将白名单文件导出到配对的发布目录。该命令不会上传。
+3. 进入发布目录审查 `git diff --cached`，运行语法检查和测试，再提交发布变更。
+4. 在发布目录执行 `npm run gate:public`，通过后使用该目录的 `git push origin main`。本机 pre-push hook 会再次执行 gate，缺少角色配置、扫描器不可用、出现私有标识或检查失败均阻止推送。
+
+不要使用 `git push --no-verify`、禁用 hooks 或从开发目录直接推送。换电脑时，先重新建立独立发布目录和本机配置、安装扫描器及两个 hook，再恢复发布；不要将本机配置提交到 GitHub。项目约定同步写在 `AGENTS.md` 和始终生效的编辑器规则中。
+
+### 本机配置格式
+
+开发仓库的配置需要 `role: "development"`、绝对路径 `target`；发布仓库需要 `role: "public"`、绝对路径 `source`。两边还需要 `remote`（本项目 GitHub HTTPS 地址）、`gitleaks`（扫描器路径）、`privateTerms`（只存本机的非空私有字符串数组）。配置文件位于 `git rev-parse --absolute-git-dir` 返回目录中，不是工作区文件；hook 路径也在各自本机 Git 配置内。
+
+## 检查命令（在对应目录执行）
 
 ```powershell
 npm run check
@@ -18,6 +39,8 @@ gitleaks git --pre-commit --staged --redact --no-banner --no-color .
 gitleaks git --redact --no-banner --no-color .
 git diff --cached --stat
 ```
+
+发布目录还需执行 `npm run gate:public`。仅运行 `check:public` 不能替代发布 gate。已有的本机 hooks 是本次配置的一部分，Git 克隆本身不会分发或自动安装 hooks。
 
 `check:public` 检查已跟踪工作文件、暂存区、所有本地引用可达提交的路径、文本和提交邮箱；只报告问题类别与文件位置，不打印命中的文本。它拒绝本机数据、预览图、压缩包、未知二进制文件和常见个人目录路径。可通过环境变量 `PUBLICATION_PRIVATE_TERMS` 提供本机专用的 JSON 字符串数组，额外匹配作品名等私有标识；不要将这些标识写入公开代码。
 
