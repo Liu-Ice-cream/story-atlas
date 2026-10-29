@@ -34,6 +34,14 @@ test('本机存储、重启恢复、备份、版本冲突与来源限制', async
     assert.equal((await fetch(`${base}/data/project.json`)).status, 404);
     assert.equal((await fetch(`${base}/`)).status, 200);
     assert.ok((await (await fetch(`${base}/`)).text()).includes('拾章'));
+    for (const name of ['maple', 'snow', 'sword']) {
+      const art = await fetch(`${base}/assets/themes/${name}.webp`);
+      assert.equal(art.status, 200); assert.equal(art.headers.get('content-type'), 'image/webp');
+      const bytes = Buffer.from(await art.arrayBuffer()); assert.equal(bytes.toString('ascii', 0, 4), 'RIFF'); assert.equal(bytes.toString('ascii', 8, 12), 'WEBP');
+    }
+    assert.equal((await fetch(`${base}/themes.css`)).status, 200);
+    assert.equal((await fetch(`${base}/theme-bootstrap.js`)).status, 200);
+    assert.equal((await fetch(`${base}/assets/themes/project.json`)).status, 404);
     const bad = await fetch(`${base}/api/ai`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ chapterIds: ['x'], endpoint: 'http://external.example', model: 'test', apiKey: '' }) });
     assert.equal(bad.status, 400);
     await stop(); base = await launch();

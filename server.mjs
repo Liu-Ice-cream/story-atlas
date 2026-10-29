@@ -16,7 +16,7 @@ import { indexStale } from './scene-engine.mjs';
 
 const root = path.dirname(fileURLToPath(import.meta.url));
 const MAX_BYTES = 80 * 1024 * 1024;
-const contentTypes = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml' };
+const contentTypes = { '.html': 'text/html; charset=utf-8', '.css': 'text/css; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.svg': 'image/svg+xml', '.webp': 'image/webp' };
 
 export async function createApp({ dataDir = path.join(root, 'data'), port = 4317 } = {}) {
   await mkdir(dataDir, { recursive: true });
@@ -242,7 +242,7 @@ export async function createApp({ dataDir = path.join(root, 'data'), port = 4317
       if (url.pathname.startsWith('/api/')) return json(res, 404, { error: '接口不存在' });
       if (req.method !== 'GET' && req.method !== 'HEAD') return json(res, 405, { error: '不支持的请求方法' });
       const staticName = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
-      if (!['index.html', 'app.js', 'styles.css', 'domain.js', 'maintenance.js', 'features.js', 'studio-domain.js', 'studio-ui.js', 'style-sampling.js', 'scene-domain.js', 'scene-ui.js', 'studio-workflow.js', 'studio-jobs-ui.js', 'reader-domain.js', 'reader-ui.js', 'reader.css', 'chapter-text.js'].includes(staticName)) return json(res, 404, { error: '文件不存在' });
+      if (!['index.html', 'app.js', 'styles.css', 'domain.js', 'maintenance.js', 'features.js', 'studio-domain.js', 'studio-ui.js', 'style-sampling.js', 'scene-domain.js', 'scene-ui.js', 'studio-workflow.js', 'studio-jobs-ui.js', 'reader-domain.js', 'reader-ui.js', 'reader.css', 'chapter-text.js', 'themes.js', 'themes.css', 'theme-bootstrap.js', 'assets/themes/maple.webp', 'assets/themes/snow.webp', 'assets/themes/sword.webp'].includes(staticName)) return json(res, 404, { error: '文件不存在' });
       const contents = await readFile(path.join(root, 'public', staticName));
       res.writeHead(200, {
         'Content-Type': contentTypes[path.extname(staticName)], 'Cache-Control': 'no-cache', 'X-Content-Type-Options': 'nosniff',
